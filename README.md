@@ -19,7 +19,6 @@ If you are frustrated with making tables in your notes, install this. This is an
 
 Add a `table` code block:
 
-```table
 Then, Hit Return to go to the next line where'd summon the interactive/visial table tool. 
 
 Or run the **Better Tables: Insert table** command from the command palette.
