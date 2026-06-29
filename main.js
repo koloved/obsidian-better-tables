@@ -62,6 +62,8 @@ class TableWidget {
     this.colW = [];
     this.rowH = [];
     this.editingCell = null;
+    this.editingPos = null;
+    this.dirty = false;
     this.rootEl = null;
     this.tableEl = null;
     this.addColEl = null;
@@ -122,6 +124,7 @@ class TableWidget {
         td.addEventListener("pointerdown", (e) => {
           if (e.button === 0) {
             e.stopPropagation();
+            e.preventDefault();
             this.editCell(td, r, c);
           }
         });
@@ -135,6 +138,7 @@ class TableWidget {
     this.addColEl.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
       e.preventDefault();
+      this.flushEdit();
       this.cells.forEach((row) => row.push(""));
       this.colW.push(TABLE_CELL_W);
       this.save();
@@ -145,6 +149,7 @@ class TableWidget {
     this.addRowEl.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
       e.preventDefault();
+      this.flushEdit();
       this.cells.push(this.cells[0].map(() => ""));
       this.rowH.push(TABLE_CELL_H);
       this.save();
@@ -263,6 +268,7 @@ class TableWidget {
       if (e.button !== 0) return;
       e.stopPropagation();
       e.preventDefault();
+      this.flushEdit();
       this.insertLineEl && this.insertLineEl.hide();
       if (axis === "col") {
         this.cells.forEach((row) => row.splice(boundary + 1, 0, ""));
@@ -403,6 +409,7 @@ class TableWidget {
     if (this.editingCell === td) return;
     this.finishEditing();
     this.editingCell = td;
+    this.editingPos = { r, c };
     td.contentEditable = "true";
     td.addClass("is-editing-cell");
     td.focus();
@@ -412,19 +419,16 @@ class TableWidget {
     const sel = window.getSelection();
     sel && sel.removeAllRanges();
     sel && sel.addRange(range);
-    const commit = () => {
-      td.contentEditable = "false";
-      td.removeClass("is-editing-cell");
-      if (this.editingCell === td) this.editingCell = null;
-      const v = (td.textContent || "").trim();
-      if (v !== this.cells[r][c]) {
-        this.cells[r][c] = v;
-        this.save();
-      } else {
-        this.layout();
-      }
-    };
-    td.addEventListener("blur", commit, { once: true });
+    // Blur commits and saves — unless the edit was already flushed (e.g. by a
+    // structural action), in which case editingCell has been cleared and this
+    // is a no-op so we never issue a second, racing save.
+    td.addEventListener(
+      "blur",
+      () => {
+        if (this.editingCell === td) this.commitCell(td, r, c, true);
+      },
+      { once: true }
+    );
     td.addEventListener("keydown", (e) => {
       e.stopPropagation();
       if (e.key === "Escape") {
@@ -461,9 +465,41 @@ class TableWidget {
     });
   }
 
+  /** Pull the edited text into the model and end edit mode. Does NOT save
+   *  unless doSave is set — structural actions flush then issue a single save. */
+  commitCell(td, r, c, doSave) {
+    td.contentEditable = "false";
+    td.removeClass("is-editing-cell");
+    if (this.editingCell === td) this.editingCell = null;
+    this.editingPos = null;
+    const v = (td.textContent || "").trim();
+    if (v !== this.cells[r][c]) {
+      this.cells[r][c] = v;
+      this.dirty = true;
+    }
+    if (doSave) {
+      if (this.dirty) this.save();
+      else this.layout();
+    } else {
+      this.layout();
+    }
+  }
+
+  /** Commit any in-progress cell edit into the model without saving, so a
+   *  following structural change can persist everything in one write. */
+  flushEdit() {
+    const td = this.editingCell;
+    const pos = this.editingPos;
+    if (!td || !pos) return;
+    this.commitCell(td, pos.r, pos.c, false);
+  }
+
   finishEditing() {
-    this.editingCell && this.editingCell.blur();
+    const td = this.editingCell;
+    const pos = this.editingPos;
+    if (td && pos) this.commitCell(td, pos.r, pos.c, false);
     this.editingCell = null;
+    this.editingPos = null;
   }
 
   // --- reorder + selection ---
@@ -695,35 +731,63 @@ class TableWidget {
     return `${md}\n${sizeLine}`;
   }
 
-  async save() {
+  save() {
+    this.dirty = false;
+    const oldBody = this.source;
     const body = this.serialize();
     this.source = body;
-    const info = this.ctx.getSectionInfo(this.el);
-    const file = this.plugin.app.vault.getAbstractFileByPath(this.ctx.sourcePath);
-    if (!info || !file) {
-      new Notice("Better Tables: couldn't locate this table in the file to save.");
-      return;
-    }
-    try {
-      await this.plugin.app.vault.process(file, (data) => {
-        const lines = data.split("\n");
-        const openFence = lines[info.lineStart];
-        const closeFence = lines[info.lineEnd];
-        const newLines = [openFence, ...body.split("\n"), closeFence];
-        lines.splice(info.lineStart, info.lineEnd - info.lineStart + 1, ...newLines);
-        return lines.join("\n");
-      });
-    } catch (err) {
-      console.error("Better Tables: save failed", err);
-      new Notice("Better Tables: failed to save table.");
-    }
-    // Obsidian re-runs the code-block processor on the file change, which
-    // rebuilds this widget from the new source. No manual re-render needed.
+    const el = this.el;
+    const ctx = this.ctx;
+    const plugin = this.plugin;
+    // Capture the block's line range NOW, while the element is still attached.
+    // It can be null right after a block is created (Obsidian hasn't indexed it
+    // yet) — in that case we fall back to locating the block by its content.
+    const info = ctx.getSectionInfo(el);
+    // Persist through a single serialized queue so writes can't interleave and
+    // clobber each other's line ranges. Obsidian re-renders the block when the
+    // file changes, so we don't render optimistically (which caused a flash).
+    plugin.queueWrite(async () => {
+      const file = plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
+      if (!file) return;
+      const sec = info || ctx.getSectionInfo(el);
+      try {
+        await plugin.app.vault.process(file, (data) => {
+          // 1) Precise path: replace a validated fenced line range.
+          if (sec) {
+            const lines = data.split("\n");
+            const open = lines[sec.lineStart];
+            const close = lines[sec.lineEnd];
+            const fenceOpen = /^\s*(`{3,}|~{3,})\s*table\b/.test(open || "");
+            const fenceClose = /^\s*(`{3,}|~{3,})\s*$/.test(close || "");
+            if (fenceOpen && fenceClose) {
+              const newLines = [open, ...body.split("\n"), close];
+              lines.splice(sec.lineStart, sec.lineEnd - sec.lineStart + 1, ...newLines);
+              return lines.join("\n");
+            }
+          }
+          // 2) Fallback: replace the previous block body by content, but only
+          //    if it occurs exactly once (otherwise we can't be sure which).
+          if (oldBody && oldBody.trim()) {
+            const idx = data.indexOf(oldBody);
+            if (idx !== -1 && data.indexOf(oldBody, idx + 1) === -1) {
+              return data.slice(0, idx) + body + data.slice(idx + oldBody.length);
+            }
+          }
+          return data; // couldn't locate the block safely — leave file untouched
+        });
+      } catch (err) {
+        console.error("Better Tables: save failed", err);
+        new Notice("Better Tables: failed to save table.");
+      }
+    });
   }
 }
 
-module.exports = class TableKitPlugin extends Plugin {
+module.exports = class BetterTablesPlugin extends Plugin {
   async onload() {
+    // Serializes all table writes so concurrent saves can never interleave.
+    this._writeChain = Promise.resolve();
+
     this.registerMarkdownCodeBlockProcessor("table", (source, el, ctx) => {
       new TableWidget(this, source, el, ctx).render();
     });
@@ -736,5 +800,11 @@ module.exports = class TableKitPlugin extends Plugin {
         editor.replaceSelection(block);
       }
     });
+  }
+
+  /** Run write tasks one at a time, in order. */
+  queueWrite(task) {
+    this._writeChain = this._writeChain.then(task, task);
+    return this._writeChain;
   }
 };
