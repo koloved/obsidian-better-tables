@@ -1,6 +1,6 @@
 "use strict";
 
-const { Plugin, Notice, setIcon } = require("obsidian");
+const { Plugin, Notice, setIcon, Menu } = require("obsidian");
 
 const TABLE_CELL_W = 140;
 const TABLE_CELL_H = 48;
@@ -35,16 +35,42 @@ function parseMdTable(text) {
   return rows;
 }
 
-function mdFromCells(cells) {
+function mdFromCells(cells, align) {
   // Pipe tables can't contain a literal pipe or newline, so escape pipes and
   // encode in-cell line breaks (Cmd+Enter) as <br>, which is valid table markup.
   const esc = (s) => s.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
   const row = (r) => "| " + r.map((c) => esc(c) || "   ").join(" | ") + " |";
-  return [
-    row(cells[0]),
-    "|" + cells[0].map(() => " --- ").join("|") + "|",
-    ...cells.slice(1).map(row)
-  ].join("\n");
+  // Column alignment lives in the separator row (portable markdown):
+  // :---: center, ---: right, --- default/left.
+  const sep = cells[0].map((_, c) => {
+    const a = align && align[c];
+    if (a === "center") return " :---: ";
+    if (a === "right") return " ---: ";
+    return " --- ";
+  });
+  return [row(cells[0]), "|" + sep.join("|") + "|", ...cells.slice(1).map(row)].join("\n");
+}
+
+/** Read per-column alignment from the table's separator row, if present. */
+function parseAlign(text) {
+  for (const line of text.split("\n")) {
+    if (/^\s*\|[\s:|-]+\|\s*$/.test(line) && line.includes("-")) {
+      return line
+        .trim()
+        .replace(/^\|/, "")
+        .replace(/\|$/, "")
+        .split("|")
+        .map((c) => {
+          const s = c.trim();
+          const l = s.startsWith(":");
+          const r = s.endsWith(":");
+          if (l && r) return "center";
+          if (r) return "right";
+          return null;
+        });
+    }
+  }
+  return null;
 }
 
 /** Pull stored column/row sizes out of the trailing size comment, if present. */
@@ -69,6 +95,7 @@ class TableWidget {
     this.cells = [["", ""], ["", ""]];
     this.colW = [];
     this.rowH = [];
+    this.colAlign = [];
     this.editingCell = null;
     this.editingPos = null;
     this.dirty = false;
@@ -110,11 +137,29 @@ class TableWidget {
     if (this.rowH.length !== rows) this.rowH = Array(rows).fill(TABLE_CELL_H);
   }
 
+  loadAlign() {
+    const cols = this.cells[0].length;
+    const a = parseAlign(this.source);
+    this.colAlign = Array.isArray(a) && a.length === cols ? a : Array(cols).fill(null);
+  }
+
+  /** Apply per-column text alignment to the cells. */
+  applyAlign() {
+    const t = this.tableEl;
+    if (!t) return;
+    Array.from(t.rows).forEach((tr) => {
+      Array.from(tr.cells).forEach((td, c) => {
+        td.style.textAlign = this.colAlign[c] || "";
+      });
+    });
+  }
+
   render() {
     const parsed = parseMdTable(this.source);
     if (parsed) this.cells = parsed;
     this.editingCell = null;
     this.loadSizes();
+    this.loadAlign();
     this.clearLineSelection();
     this.el.empty();
     this.el.addClass("tk-block");
@@ -133,6 +178,7 @@ class TableWidget {
       });
     });
     this.applySizes();
+    this.applyAlign();
 
     this.addColEl = root.createDiv({ cls: "cp-table-add cp-table-add-col", attr: { "aria-label": "Add column" } });
     setIcon(this.addColEl, "plus");
@@ -142,6 +188,7 @@ class TableWidget {
       this.flushEdit();
       this.cells.forEach((row) => row.push(""));
       this.colW.push(TABLE_CELL_W);
+      this.colAlign.push(null);
       this.save();
     });
 
@@ -295,6 +342,7 @@ class TableWidget {
       if (axis === "col") {
         this.cells.forEach((row) => row.splice(boundary + 1, 0, ""));
         this.colW.splice(boundary + 1, 0, TABLE_CELL_W);
+        this.colAlign.splice(boundary + 1, 0, null);
       } else {
         this.cells.splice(boundary + 1, 0, this.cells[0].map(() => ""));
         this.rowH.splice(boundary + 1, 0, TABLE_CELL_H);
@@ -454,6 +502,39 @@ class TableWidget {
       }
     });
     td.addEventListener("input", () => window.requestAnimationFrame(() => this.layout()));
+    // Right-click a cell → set its column's text alignment (markdown only
+    // supports per-column alignment, so this applies to the whole column).
+    td.addEventListener("contextmenu", (e) => {
+      if (this.editingCell) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const cur = this.colAlign[c] || "left";
+      const menu = new Menu();
+      [
+        ["Align left", "align-left", "left"],
+        ["Align center", "align-center", "center"],
+        ["Align right", "align-right", "right"]
+      ].forEach(([title, icon, val]) => {
+        menu.addItem((i) =>
+          i
+            .setTitle(title)
+            .setIcon(icon)
+            .setChecked(cur === val)
+            .onClick(() => this.setColAlign(c, val))
+        );
+      });
+      menu.showAtMouseEvent(e);
+    });
+  }
+
+  /** Set a column's alignment and persist. "left" is the markdown default, so
+   *  it's stored as null (a plain --- separator). */
+  setColAlign(c, val) {
+    this.flushEdit();
+    this.colAlign[c] = val === "left" ? null : val;
+    this.applyAlign();
+    this.dirty = true;
+    this.save();
   }
 
   editCell(td, r, c, fromKeyboard) {
@@ -797,6 +878,8 @@ class TableWidget {
             }
             const [w] = this.colW.splice(index, 1);
             this.colW.splice(target, 0, w);
+            const [al] = this.colAlign.splice(index, 1);
+            this.colAlign.splice(target, 0, al);
           }
           this.save();
         } else {
@@ -899,6 +982,7 @@ class TableWidget {
     } else {
       for (const row of this.cells) row.splice(index, 1);
       this.colW.splice(index, 1);
+      this.colAlign.splice(index, 1);
     }
     this.clearLineSelection();
     this.save();
@@ -990,7 +1074,7 @@ class TableWidget {
 
   // --- persistence: write the block back into the note file ---
   serialize() {
-    const md = mdFromCells(this.cells);
+    const md = mdFromCells(this.cells, this.colAlign);
     const sizeLine = `<!-- tk:cols=${this.colW.join(",")};rows=${this.rowH.join(",")} -->`;
     return `${md}\n${sizeLine}`;
   }
