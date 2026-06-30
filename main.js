@@ -199,10 +199,11 @@ class TableWidget {
       this.insertRowDots.push(dot);
     }
 
-    // Delete-whole-table button: a trash pill at the table's top-left corner,
-    // revealed with the rest of the hover chrome.
-    this.deleteTableEl = root.createDiv({
-      cls: "cp-table-delete cp-table-delete-table",
+    // Delete-table button: sits at the block's top-right next to Obsidian's
+    // "edit this block" control and is styled like a standard clickable icon
+    // (grey bin, grey hover fill). Lives on the block el, not the table chrome.
+    this.deleteTableEl = this.el.createDiv({
+      cls: "cp-delete-block clickable-icon",
       attr: { "aria-label": "Delete table" }
     });
     setIcon(this.deleteTableEl, "trash-2");
@@ -271,14 +272,12 @@ class TableWidget {
     this.addRowEl && this.addRowEl.toggleClass("is-visible", r === rows - 1);
     this.insertColDots.forEach((d, i) => d.toggleClass("is-visible", i === c - 1 || i === c));
     this.insertRowDots.forEach((d, i) => d.toggleClass("is-visible", i === r - 1 || i === r));
-    this.deleteTableEl && this.deleteTableEl.addClass("is-visible");
   }
 
   hideChrome() {
     const all = [...this.colHandles, ...this.rowHandles, ...this.insertColDots, ...this.insertRowDots];
     if (this.addColEl) all.push(this.addColEl);
     if (this.addRowEl) all.push(this.addRowEl);
-    if (this.deleteTableEl) all.push(this.deleteTableEl);
     for (const el of all) el.removeClass("is-visible");
     this.insertLineEl && this.insertLineEl.hide();
   }
@@ -394,10 +393,6 @@ class TableWidget {
         d.style.left = "-12px";
       }
     });
-    if (this.deleteTableEl) {
-      this.deleteTableEl.style.left = "-18px";
-      this.deleteTableEl.style.top = "-18px";
-    }
     this.positionDeleteBtn();
   }
 
@@ -521,7 +516,12 @@ class TableWidget {
           td.blur();
         } else if (e.key === "Tab") {
           e.preventDefault();
-          this.editNeighbor(r, c, 0, e.shiftKey ? -1 : 1, true);
+          const lastCell = r === this.cells.length - 1 && c === this.cells[0].length - 1;
+          // Tab off the bottom-right cell grows the table and continues in the
+          // new row's first cell, so you can fill a table without reaching for
+          // the mouse.
+          if (!e.shiftKey && lastCell) this.appendRowAndEdit(0);
+          else this.editNeighbor(r, c, 0, e.shiftKey ? -1 : 1, true);
         } else if (e.key === "Enter") {
           e.preventDefault();
           // Enter on the last row grows the table and keeps editing in the new

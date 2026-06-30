@@ -1,8 +1,26 @@
 /* Better Tables — interactive markdown tables inside a ```table code block. */
 
 .tk-block {
+	position: relative;
 	overflow: visible;
 	padding: 0;
+}
+
+/* Delete-table button: top-right of the block, just left of Obsidian's
+   "edit this block" control. Hidden until the block is hovered, matching the
+   native edit button's reveal. clickable-icon supplies the grey-icon /
+   grey-hover-fill styling. */
+.cp-delete-block.cp-delete-block {
+	position: absolute;
+	top: var(--size-4-1, 4px);
+	right: 30px;
+	z-index: 10;
+	opacity: 0;
+	transition: opacity 100ms ease;
+}
+
+.tk-block:hover .cp-delete-block {
+	opacity: 1;
 }
 
 /* Scrollable, padded frame. Padding gives the reorder handles, insert dots,
@@ -170,18 +188,6 @@
 
 .cp-table-delete:hover {
 	background: var(--background-modifier-error-hover, var(--background-modifier-hover));
-}
-
-/* whole-table delete: corner pill that fades in with the rest of the chrome */
-.cp-table-delete-table {
-	opacity: 0;
-	pointer-events: none;
-	transition: opacity 120ms ease;
-}
-
-.cp-table-delete-table.is-visible {
-	opacity: 1;
-	pointer-events: auto;
 }
 
 .cp-table-delete svg {
