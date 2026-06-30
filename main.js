@@ -1,6 +1,6 @@
 "use strict";
 
-const { Plugin, Notice, setIcon, MarkdownRenderer } = require("obsidian");
+const { Plugin, Notice, setIcon, MarkdownRenderer, Scope, Menu } = require("obsidian");
 
 const TABLE_CELL_W = 140;
 const TABLE_CELL_H = 48;
@@ -87,6 +87,7 @@ class TableWidget {
     this.selected = null;
     this.deleteBtnEl = null;
     this.deleteTableEl = null;
+    this.editScope = null;
     this.lineSelOutside = null;
     this.lineSelKey = null;
   }
@@ -433,7 +434,10 @@ class TableWidget {
   renderCell(td, text) {
     td.empty();
     if (!text) return;
-    MarkdownRenderer.render(this.plugin.app, text, td, this.ctx.sourcePath, this.plugin)
+    // Render in-cell newlines as a single inline <br> rather than letting
+    // Markdown split them into separate paragraphs (which added a big gap).
+    const md = text.replace(/\n/g, "<br>");
+    MarkdownRenderer.render(this.plugin.app, md, td, this.ctx.sourcePath, this.plugin)
       .then(() => {
         if (this.editingCell === td) return; // user re-entered edit mid-render
         // Unwrap the single wrapping <p> Obsidian adds so the cell stays compact
@@ -474,6 +478,68 @@ class TableWidget {
       }
     });
     td.addEventListener("input", () => window.requestAnimationFrame(() => this.layout()));
+    // Right-click a selection inside an editing cell → Bold / Italic, wrapping
+    // it in markdown (the native editor format menu would target the note, not
+    // the cell). We capture character offsets, not a DOM range, so the action
+    // survives the cell re-rendering when the menu steals focus.
+    td.addEventListener("contextmenu", (e) => {
+      if (this.editingCell !== td) return;
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const range = sel.getRangeAt(0);
+      const start = this.charOffset(td, range.startContainer, range.startOffset);
+      const end = this.charOffset(td, range.endContainer, range.endOffset);
+      const menu = new Menu();
+      menu.addItem((i) => i.setTitle("Bold").setIcon("bold").onClick(() => this.applyWrap(td, r, c, start, end, "**")));
+      menu.addItem((i) => i.setTitle("Italic").setIcon("italic").onClick(() => this.applyWrap(td, r, c, start, end, "*")));
+      menu.showAtMouseEvent(e);
+    });
+  }
+
+  /** Character offset from the cell start to (container, offset), counting <br>
+   *  and block boundaries as one char so offsets match the raw markdown text. */
+  charOffset(td, container, offset) {
+    const r = this.doc.createRange();
+    r.selectNodeContents(td);
+    r.setEnd(container, offset);
+    return this.cellText(r.cloneContents()).length;
+  }
+
+  /** Re-enter edit mode with clean raw source, reselect the captured offset
+   *  span, and wrap it. Used by the right-click format menu. */
+  applyWrap(td, r, c, start, end, marker) {
+    this.finishEditing();
+    this.editCell(td, r, c, false);
+    const node = td.firstChild;
+    if (!node || node.nodeType !== 3) return;
+    const len = node.nodeValue.length;
+    const range = this.doc.createRange();
+    range.setStart(node, Math.min(start, len));
+    range.setEnd(node, Math.min(end, len));
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    this.wrapSelection(marker);
+  }
+
+  /** Lazily build the keymap scope that redirects Mod+B / Mod+I to markdown
+   *  wrapping. Returning false from a handler stops Obsidian's editor command. */
+  ensureEditScope() {
+    if (this.editScope) return this.editScope;
+    this.editScope = new Scope(this.plugin.app.scope);
+    this.editScope.register(["Mod"], "b", () => {
+      this.wrapSelection("**");
+      return false;
+    });
+    this.editScope.register(["Mod"], "i", () => {
+      this.wrapSelection("*");
+      return false;
+    });
+    return this.editScope;
   }
 
   editCell(td, r, c, fromKeyboard) {
@@ -498,6 +564,10 @@ class TableWidget {
       sel && sel.removeAllRanges();
       sel && sel.addRange(range);
     }
+    // Take over Mod+B / Mod+I while this cell is being edited so they wrap the
+    // selection in markdown instead of running Obsidian's editor bold/italic
+    // (which leaked **** into the underlying note).
+    this.plugin.activateEditScope(this.ensureEditScope());
     // Blur commits and saves — unless the edit was already committed (e.g. by a
     // structural action or keyboard navigation), in which case editingCell has
     // been cleared and this is a no-op so we never issue a racing save.
@@ -526,20 +596,8 @@ class TableWidget {
           sel && sel.addRange(range);
           return;
         }
-        // Cmd/Ctrl+B / I — wrap the selection in markdown markers instead of
-        // letting the browser inject <b>/<i> (which broke serialization).
-        if (mod && (e.key === "b" || e.key === "B")) {
-          e.preventDefault();
-          e.stopPropagation();
-          this.wrapSelection("**");
-          return;
-        }
-        if (mod && (e.key === "i" || e.key === "I")) {
-          e.preventDefault();
-          e.stopPropagation();
-          this.wrapSelection("*");
-          return;
-        }
+        // (Mod+B / Mod+I are handled by the edit scope — see ensureEditScope —
+        // so they take priority over Obsidian's editor commands.)
         // Cmd/Ctrl+Enter or Shift+Enter — insert a line break inside the cell.
         if ((mod || e.shiftKey) && e.key === "Enter") {
           e.preventDefault();
@@ -740,6 +798,7 @@ class TableWidget {
     // (which cancelled the first Tab/Enter).
     if (this.editingCell === td) this.editingCell = null;
     this.editingPos = null;
+    if (this.editScope) this.plugin.deactivateEditScope(this.editScope);
     td.contentEditable = "false";
     td.removeClass("is-editing-cell");
     const v = this.cellText(td).trim();
@@ -1135,6 +1194,29 @@ module.exports = class BetterTablesPlugin extends Plugin {
   queueWrite(task) {
     this._writeChain = this._writeChain.then(task, task);
     return this._writeChain;
+  }
+
+  /** Push a cell-edit keymap scope so our Mod+B/I beat Obsidian's editor
+   *  commands. Only one cell edits at a time across all tables, so activating a
+   *  new scope pops any previous one — preventing a stuck global override. */
+  activateEditScope(scope) {
+    if (this._activeEditScope) this.app.keymap.popScope(this._activeEditScope);
+    this._activeEditScope = scope;
+    this.app.keymap.pushScope(scope);
+  }
+
+  deactivateEditScope(scope) {
+    if (this._activeEditScope === scope) {
+      this.app.keymap.popScope(scope);
+      this._activeEditScope = null;
+    }
+  }
+
+  onunload() {
+    if (this._activeEditScope) {
+      this.app.keymap.popScope(this._activeEditScope);
+      this._activeEditScope = null;
+    }
   }
 };
 
