@@ -169,6 +169,11 @@
 	background: hsla(var(--interactive-accent-hsl), 0.14);
 }
 
+/* drag-selected block of cells */
+.cp-table td.cp-cell-selected {
+	background: hsla(var(--interactive-accent-hsl), 0.2);
+}
+
 .cp-table-delete {
 	position: absolute;
 	display: flex;

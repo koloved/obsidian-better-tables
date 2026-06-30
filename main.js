@@ -116,6 +116,9 @@ class TableWidget {
     this.deleteTableEl = null;
     this.lineSelOutside = null;
     this.lineSelKey = null;
+    this.cellSel = null;
+    this.cellSelOutside = null;
+    this.cellSelKey = null;
   }
 
   get doc() {
@@ -161,6 +164,7 @@ class TableWidget {
     this.loadSizes();
     this.loadAlign();
     this.clearLineSelection();
+    this.clearCellSelection();
     this.el.empty();
     this.el.addClass("tk-block");
 
@@ -487,19 +491,13 @@ class TableWidget {
     td.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       // Already editing this cell: leave the event alone so native caret
-      // placement and drag-to-select work.
+      // placement and drag-to-select-text work.
       if (this.editingCell === td) return;
       e.preventDefault();
       e.stopPropagation();
-      this.editCell(td, r, c, false);
-      // We suppressed the default caret placement above, so set the caret at the
-      // clicked point ourselves.
-      const range = this.doc.caretRangeFromPoint && this.doc.caretRangeFromPoint(e.clientX, e.clientY);
-      if (range) {
-        const sel = window.getSelection();
-        sel && sel.removeAllRanges();
-        sel && sel.addRange(range);
-      }
+      // A press here is ambiguous: a click edits the cell, a drag selects a
+      // range of cells. beginCellPointer resolves it on move/up.
+      this.beginCellPointer(td, r, c, e);
     });
     td.addEventListener("input", () => window.requestAnimationFrame(() => this.layout()));
     // Right-click a cell → set its column's text alignment (markdown only
@@ -515,6 +513,12 @@ class TableWidget {
       e.preventDefault();
       e.stopPropagation();
       const menu = new Menu();
+      // If this cell is part of a drag selection, offer block actions first.
+      if (this.cellInSelection(r, c)) {
+        menu.addItem((i) => i.setTitle("Copy").setIcon("copy").onClick(() => this.copyCellSelection()));
+        menu.addItem((i) => i.setTitle("Clear contents").setIcon("eraser").onClick(() => this.clearSelectedCells()));
+        menu.addSeparator();
+      }
       this.addAlignItems(menu, c);
       menu.showAtMouseEvent(e);
     });
@@ -549,7 +553,172 @@ class TableWidget {
     this.save();
   }
 
+  // --- cell range selection (drag across cells) ---
+  /** Resolve a press on a cell into either a click (edit) or a drag (select a
+   *  rectangular block of cells). */
+  beginCellPointer(startTd, r0, c0, downEvt) {
+    this.clearCellSelection();
+    const startX = downEvt.clientX;
+    const startY = downEvt.clientY;
+    let dragging = false;
+    const onMove = (ev) => {
+      if (!dragging) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
+        dragging = true;
+        this.finishEditing();
+        this.clearLineSelection();
+        this.beginCellSelection(r0, c0);
+      }
+      const cell = this.cellAtPoint(ev.clientX, ev.clientY);
+      if (cell) this.updateCellSelection(cell.r, cell.c);
+    };
+    const onUp = (ev) => {
+      this.doc.removeEventListener("mousemove", onMove, true);
+      this.doc.removeEventListener("mouseup", onUp, true);
+      if (dragging) return; // selection stays
+      // A plain click: edit the cell, caret at the click point.
+      this.editCell(startTd, r0, c0, false);
+      const range = this.doc.caretRangeFromPoint && this.doc.caretRangeFromPoint(ev.clientX, ev.clientY);
+      if (range) {
+        const sel = window.getSelection();
+        sel && sel.removeAllRanges();
+        sel && sel.addRange(range);
+      }
+    };
+    this.doc.addEventListener("mousemove", onMove, true);
+    this.doc.addEventListener("mouseup", onUp, true);
+  }
+
+  /** Hit-test a viewport point to the cell under it, or null. */
+  cellAtPoint(x, y) {
+    const t = this.tableEl;
+    if (!t) return null;
+    for (let ri = 0; ri < t.rows.length; ri++) {
+      const row = t.rows[ri];
+      for (let ci = 0; ci < row.cells.length; ci++) {
+        const rect = row.cells[ci].getBoundingClientRect();
+        if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return { r: ri, c: ci };
+      }
+    }
+    return null;
+  }
+
+  beginCellSelection(r0, c0) {
+    this.cellSel = { r0, c0, r1: r0, c1: c0 };
+    this.highlightCellSelection();
+    this.cellSelOutside = (ev) => {
+      if (!this.rootEl || !this.rootEl.contains(ev.target)) this.clearCellSelection();
+    };
+    this.doc.addEventListener("pointerdown", this.cellSelOutside, true);
+    this.cellSelKey = (ev) => {
+      if (this.isEditing() || !this.cellSel) return;
+      if (ev.key === "Delete" || ev.key === "Backspace") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.clearSelectedCells();
+      } else if (ev.key === "Escape") {
+        this.clearCellSelection();
+      } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === "c" || ev.key === "C")) {
+        ev.preventDefault();
+        this.copyCellSelection();
+      }
+    };
+    this.doc.addEventListener("keydown", this.cellSelKey, true);
+  }
+
+  updateCellSelection(r1, c1) {
+    if (!this.cellSel) return;
+    if (this.cellSel.r1 === r1 && this.cellSel.c1 === c1) return;
+    this.cellSel.r1 = r1;
+    this.cellSel.c1 = c1;
+    this.highlightCellSelection();
+  }
+
+  /** Normalized {rA,rB,cA,cB} bounds of the current cell selection. */
+  selRect() {
+    const { r0, c0, r1, c1 } = this.cellSel;
+    return {
+      rA: Math.min(r0, r1),
+      rB: Math.max(r0, r1),
+      cA: Math.min(c0, c1),
+      cB: Math.max(c0, c1)
+    };
+  }
+
+  highlightCellSelection() {
+    const t = this.tableEl;
+    if (!t) return;
+    t.querySelectorAll("td.cp-cell-selected").forEach((td) => td.removeClass("cp-cell-selected"));
+    if (!this.cellSel) return;
+    const { rA, rB, cA, cB } = this.selRect();
+    for (let ri = rA; ri <= rB; ri++) {
+      for (let ci = cA; ci <= cB; ci++) {
+        const cell = t.rows[ri] && t.rows[ri].cells[ci];
+        if (cell) cell.addClass("cp-cell-selected");
+      }
+    }
+  }
+
+  clearCellSelection() {
+    if (this.tableEl) {
+      this.tableEl.querySelectorAll("td.cp-cell-selected").forEach((td) => td.removeClass("cp-cell-selected"));
+    }
+    this.cellSel = null;
+    if (this.cellSelOutside) {
+      this.doc.removeEventListener("pointerdown", this.cellSelOutside, true);
+      this.cellSelOutside = null;
+    }
+    if (this.cellSelKey) {
+      this.doc.removeEventListener("keydown", this.cellSelKey, true);
+      this.cellSelKey = null;
+    }
+  }
+
+  /** Empty every cell in the selection, then persist. */
+  clearSelectedCells() {
+    if (!this.cellSel) return;
+    const { rA, rB, cA, cB } = this.selRect();
+    let changed = false;
+    for (let ri = rA; ri <= rB; ri++) {
+      for (let ci = cA; ci <= cB; ci++) {
+        if (this.cells[ri][ci] !== "") {
+          this.cells[ri][ci] = "";
+          changed = true;
+        }
+      }
+    }
+    // Clear first so this widget's doc listeners are removed before save()
+    // re-renders the block into a fresh widget.
+    this.clearCellSelection();
+    if (changed) {
+      this.dirty = true;
+      this.save();
+    }
+  }
+
+  /** Copy the selection to the clipboard as tab-separated rows. */
+  copyCellSelection() {
+    if (!this.cellSel) return;
+    const { rA, rB, cA, cB } = this.selRect();
+    const lines = [];
+    for (let ri = rA; ri <= rB; ri++) {
+      const row = [];
+      for (let ci = cA; ci <= cB; ci++) row.push(this.cells[ri][ci]);
+      lines.push(row.join("\t"));
+    }
+    navigator.clipboard.writeText(lines.join("\n"));
+    new Notice("Better Tables: cells copied.");
+  }
+
+  /** True if (r,c) falls inside the current cell selection. */
+  cellInSelection(r, c) {
+    if (!this.cellSel) return false;
+    const { rA, rB, cA, cB } = this.selRect();
+    return r >= rA && r <= rB && c >= cA && c <= cB;
+  }
+
   editCell(td, r, c, fromKeyboard) {
+    if (this.editingCell === td) return;
     if (this.editingCell === td) return;
     this.finishEditing();
     this.editingCell = td;
@@ -905,6 +1074,7 @@ class TableWidget {
 
   selectLine(axis, index) {
     this.clearLineSelection();
+    this.clearCellSelection();
     const table = this.tableEl;
     const root = this.rootEl;
     if (!table || !root) return;
