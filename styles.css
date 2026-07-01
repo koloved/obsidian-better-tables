@@ -173,7 +173,7 @@
    is drawn separately by .cp-cell-selbox (an overlay), so the cells' own grid
    borders can't paint over it. */
 .cp-table td.cp-cell-selected {
-	background: hsla(var(--interactive-accent-hsl), 0.14);
+	background: hsla(var(--interactive-accent-hsl), 0.07);
 }
 
 /* single overlay rectangle framing the whole selection, above the grid lines.

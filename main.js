@@ -496,17 +496,12 @@ class TableWidget {
       // Already editing this cell: leave the event alone so native caret
       // placement and drag-to-select-text work.
       if (this.editingCell === td) return;
-      // Editing a DIFFERENT cell: pressing elsewhere just commits that edit.
-      // Don't start a cell selection — editing is a focused mode.
-      if (this.editingCell) {
-        e.preventDefault();
-        e.stopPropagation();
-        this.finishEditing();
-        return;
-      }
       e.preventDefault();
       e.stopPropagation();
-      // A press here is ambiguous: a click edits the cell, a drag selects a
+      // Editing a DIFFERENT cell: commit that edit first, then treat this press
+      // normally (click → select the cell, drag → select a range).
+      if (this.editingCell) this.finishEditing();
+      // A press here is ambiguous: a click selects the cell, a drag selects a
       // range of cells. beginCellPointer resolves it on move/up.
       this.beginCellPointer(td, r, c, e);
     });
