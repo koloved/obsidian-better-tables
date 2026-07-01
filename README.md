@@ -46,7 +46,7 @@ Your table is saved as a normal Markdown table, so it still works everywhere els
 
 ## Support
 
-Thank you for using Better Tables! If you run into a bug or have an idea, please [open an issue](https://github.com/yaye-work/obsidian-better-tables/issues) — feature requests and bug reports are very welcome.
+Thank you for using Better Tables! If you run into a bug or have an idea, please [open an issue](https://github.com/yaye-work/obsidian-better-tables/issues). Feature requests and bug reports are very welcome.
 
 And if you like Better Tables, you can [buy me a coffee ☕](https://buymeacoffee.com/yaye.work). It's genuinely appreciated.
 
