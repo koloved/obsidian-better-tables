@@ -20,18 +20,23 @@ If you are frustrated with making tables in your notes, install this. Summon the
 
 ## Usage
 
-Add a code block with the word `table`, like this:
+1. Add a code block with the word `table`, like this:
 
 ````
 ```table
 ```
 ````
 
-The interactive table appears right away. Or run the **Better Tables: Insert table** command from the command palette.
+Go to the next line, you'd summoned you interactive table.
+
+2. run the **Better Tables: Insert table** command from the command palette.
+
+3. If you have ````slash commander```` core plugin installed, you can use ````/better tables````
 
 Your table is saved as a normal Markdown table, so it still works everywhere else. Column widths and row heights are kept in a small hidden comment inside the block (e.g. `<!-- tk:cols=140,140;rows=48,48 -->`).
 
 ## Installation
+Add to Obsidian https://community.obsidian.md/plugins/better-tables
 
 ### Manual
 
