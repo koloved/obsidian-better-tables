@@ -6,24 +6,31 @@ If you are frustrated with making tables in your notes, install this. Summon the
 
 ## Features
 
-- **Click to edit** any cell, with `Tab` / `Enter` to move between cells
-- **Drag dividers** to resize columns and rows
-- **Drag the edge handles** to reorder columns and rows
-- **Hover insert dots** to add a column or row between any two
-- **Select + delete** a row or column (click its handle, then `Delete`)
-- **Add** columns and rows from the `+` pills on the right and bottom edges
-- Horizontal scrolling for wide tables
-- Column widths and row heights are remembered
+- **Click a cell to select it. Click again to edit.** (Or turn on "Quick text edit" to edit with one click.)
+- **Move around with the keyboard.** Use the arrow keys, or `Tab` and `Enter`.
+- **Press `Enter` on a selected cell** to start editing it.
+- **Drag across cells** to select a block. Then copy it, or press `Delete` to clear it.
+- **Drag the lines** between rows and columns to resize them.
+- **Drag the handles** on the top and left edges to reorder rows and columns.
+- **Hover between cells** and click the dot to insert a row or column.
+- **Click the `+` buttons** on the right and bottom to add a row or column.
+- **Right-click a cell** to align its column left, center, or right.
+- **Add a line break inside a cell** with `Shift+Enter`.
+- **Delete the whole table** with the trash button in the top corner.
+- Wide tables scroll sideways. Your column widths and row heights are saved.
 
 ## Usage
 
-Add a `table` code block:
+Add a code block with the word `table`, like this:
 
-Then, go to the next line, and you'd summon the interactive/visial table tool. 
+````
+```table
+```
+````
 
-Or run the **Better Tables: Insert table** command from the command palette.
+The interactive table appears right away. Or run the **Better Tables: Insert table** command from the command palette.
 
-Column/row sizes are stored in a small trailing comment inside the block (e.g. `<!-- tk:cols=140,140;rows=48,48 -->`); the table itself stays valid Markdown.
+Your table is saved as a normal Markdown table, so it still works everywhere else. Column widths and row heights are kept in a small hidden comment inside the block (e.g. `<!-- tk:cols=140,140;rows=48,48 -->`).
 
 ## Installation
 
