@@ -169,11 +169,34 @@
 	background: hsla(var(--interactive-accent-hsl), 0.14);
 }
 
-/* drag-selected block of cells: lighter tint plus an accent outline so the
-   cell's own grid border stays legible under the highlight */
+/* drag-selected block of cells: lighter tint on every cell, with the accent
+   border drawn only on the block's outer perimeter so a multi-cell selection
+   reads as one rectangle (no doubled-up interior outlines). Each edge class
+   fills its own box-shadow slot; the base rule composes all four, so any
+   combination of edges (sides, corners, single cell) just works. */
 .cp-table td.cp-cell-selected {
 	background: hsla(var(--interactive-accent-hsl), 0.14);
-	box-shadow: inset 0 0 0 1px var(--interactive-accent);
+	--sel-t: inset 0 0 0 0 transparent;
+	--sel-r: inset 0 0 0 0 transparent;
+	--sel-b: inset 0 0 0 0 transparent;
+	--sel-l: inset 0 0 0 0 transparent;
+	box-shadow: var(--sel-t), var(--sel-r), var(--sel-b), var(--sel-l);
+}
+
+.cp-table td.cp-sel-top {
+	--sel-t: inset 0 1px 0 0 var(--interactive-accent);
+}
+
+.cp-table td.cp-sel-right {
+	--sel-r: inset -1px 0 0 0 var(--interactive-accent);
+}
+
+.cp-table td.cp-sel-bottom {
+	--sel-b: inset 0 -1px 0 0 var(--interactive-accent);
+}
+
+.cp-table td.cp-sel-left {
+	--sel-l: inset 1px 0 0 0 var(--interactive-accent);
 }
 
 .cp-table-delete {

@@ -681,20 +681,30 @@ class TableWidget {
   highlightCellSelection() {
     const t = this.tableEl;
     if (!t) return;
-    t.querySelectorAll("td.cp-cell-selected").forEach((td) => td.removeClass("cp-cell-selected"));
+    const edges = ["cp-sel-top", "cp-sel-right", "cp-sel-bottom", "cp-sel-left"];
+    t.querySelectorAll("td.cp-cell-selected").forEach((td) => td.removeClasses(["cp-cell-selected", ...edges]));
     if (!this.cellSel) return;
     const { rA, rB, cA, cB } = this.selRect();
     for (let ri = rA; ri <= rB; ri++) {
       for (let ci = cA; ci <= cB; ci++) {
         const cell = t.rows[ri] && t.rows[ri].cells[ci];
-        if (cell) cell.addClass("cp-cell-selected");
+        if (!cell) continue;
+        cell.addClass("cp-cell-selected");
+        // Border only the block's outer perimeter, so adjacent selected cells
+        // read as one rectangle instead of stacking double interior outlines.
+        if (ri === rA) cell.addClass("cp-sel-top");
+        if (ri === rB) cell.addClass("cp-sel-bottom");
+        if (ci === cA) cell.addClass("cp-sel-left");
+        if (ci === cB) cell.addClass("cp-sel-right");
       }
     }
   }
 
   clearCellSelection() {
     if (this.tableEl) {
-      this.tableEl.querySelectorAll("td.cp-cell-selected").forEach((td) => td.removeClass("cp-cell-selected"));
+      this.tableEl.querySelectorAll("td.cp-cell-selected").forEach((td) =>
+        td.removeClasses(["cp-cell-selected", "cp-sel-top", "cp-sel-right", "cp-sel-bottom", "cp-sel-left"])
+      );
     }
     this.cellSel = null;
     if (this.cellSelOutside) {
