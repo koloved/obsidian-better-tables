@@ -1,6 +1,12 @@
 "use strict";
 
-const { Plugin, Notice, setIcon, Menu } = require("obsidian");
+const { Plugin, Notice, setIcon, Menu, PluginSettingTab, Setting } = require("obsidian");
+
+const DEFAULT_SETTINGS = {
+  // false: click selects a cell, a second click (or Enter) edits it.
+  // true:  a single click edits the cell immediately ("quick text edit").
+  quickEdit: false
+};
 
 const TABLE_CELL_W = 140;
 const TABLE_CELL_H = 48;
@@ -601,13 +607,15 @@ class TableWidget {
       this.doc.removeEventListener("mousemove", onMove, true);
       this.doc.removeEventListener("mouseup", onUp, true);
       if (dragging) return; // selection stays
-      if (!wasSelected) {
-        // First click on this cell: just select it (single-cell selection).
+      // In two-step mode (default), the first click only selects; editing needs
+      // a second click on the already-selected cell. In quick-edit mode a single
+      // click edits straight away.
+      if (!this.plugin.settings.quickEdit && !wasSelected) {
         this.clearLineSelection();
         this.beginCellSelection(r0, c0);
         return;
       }
-      // Second click on the already-selected cell: edit it, caret at the click.
+      // Edit the cell, caret at the click point.
       this.editCell(startTd, r0, c0, false);
       const range = this.doc.caretRangeFromPoint && this.doc.caretRangeFromPoint(ev.clientX, ev.clientY);
       if (range) {
@@ -652,6 +660,13 @@ class TableWidget {
       } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === "c" || ev.key === "C")) {
         ev.preventDefault();
         this.copyCellSelection();
+      } else if (ev.key === "Enter" || ev.key === "F2") {
+        // Edit the selection's anchor cell, caret at the end.
+        ev.preventDefault();
+        ev.stopPropagation();
+        const { r0, c0 } = this.cellSel;
+        const td = this.tableEl.rows[r0] && this.tableEl.rows[r0].cells[c0];
+        if (td) this.editCell(td, r0, c0, true);
       }
     };
     this.doc.addEventListener("keydown", this.cellSelKey, true);
@@ -1381,6 +1396,9 @@ module.exports = class BetterTablesPlugin extends Plugin {
     // Serializes all table writes so concurrent saves can never interleave.
     this._writeChain = Promise.resolve();
 
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.addSettingTab(new BetterTablesSettingTab(this.app, this));
+
     this.registerMarkdownCodeBlockProcessor("table", (source, el, ctx) => {
       new TableWidget(this, source, el, ctx).render();
     });
@@ -1408,12 +1426,40 @@ module.exports = class BetterTablesPlugin extends Plugin {
     });
   }
 
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
   /** Run write tasks one at a time, in order. */
   queueWrite(task) {
     this._writeChain = this._writeChain.then(task, task);
     return this._writeChain;
   }
 };
+
+class BetterTablesSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    new Setting(containerEl)
+      .setName("Quick text edit")
+      .setDesc(
+        "On: a single click on a cell edits its text immediately. " +
+          "Off: the first click selects the cell and a second click (or Enter) starts editing."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.quickEdit).onChange(async (value) => {
+          this.plugin.settings.quickEdit = value;
+          await this.plugin.saveSettings();
+        })
+      );
+  }
+}
 
 /* nosourcemap */
 /* nosourcemap */
