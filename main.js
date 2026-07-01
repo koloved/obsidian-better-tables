@@ -493,6 +493,14 @@ class TableWidget {
       // Already editing this cell: leave the event alone so native caret
       // placement and drag-to-select-text work.
       if (this.editingCell === td) return;
+      // Editing a DIFFERENT cell: pressing elsewhere just commits that edit.
+      // Don't start a cell selection — editing is a focused mode.
+      if (this.editingCell) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.finishEditing();
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       // A press here is ambiguous: a click edits the cell, a drag selects a
@@ -514,20 +522,27 @@ class TableWidget {
       e.stopPropagation();
       const menu = new Menu();
       // If this cell is part of a drag selection, offer block actions first.
+      let cols = [c];
       if (this.cellInSelection(r, c)) {
         menu.addItem((i) => i.setTitle("Copy").setIcon("copy").onClick(() => this.copyCellSelection()));
         menu.addItem((i) => i.setTitle("Clear contents").setIcon("eraser").onClick(() => this.clearSelectedCells()));
         menu.addSeparator();
+        // Align every column the selection spans, not just the one clicked.
+        const { cA, cB } = this.selRect();
+        cols = [];
+        for (let ci = cA; ci <= cB; ci++) cols.push(ci);
       }
-      this.addAlignItems(menu, c);
+      this.addAlignItems(menu, cols);
       menu.showAtMouseEvent(e);
     });
   }
 
   /** Append the three column-alignment items to a menu. Shared by our own
    *  right-click menu and the injected entries in Obsidian's editor menu. */
-  addAlignItems(menu, c) {
-    const cur = this.colAlign[c] || "left";
+  addAlignItems(menu, cols) {
+    const list = Array.isArray(cols) ? cols : [cols];
+    // Show a checkmark only when every targeted column shares that alignment.
+    const allAre = (val) => list.every((c) => (this.colAlign[c] || "left") === val);
     [
       ["Align left", "align-left", "left"],
       ["Align center", "align-center", "center"],
@@ -537,17 +552,20 @@ class TableWidget {
         i
           .setTitle(title)
           .setIcon(icon)
-          .setChecked(cur === val)
-          .onClick(() => this.setColAlign(c, val))
+          .setChecked(allAre(val))
+          .onClick(() => this.setColAlign(list, val))
       );
     });
   }
 
   /** Set a column's alignment and persist. "left" is the markdown default, so
    *  it's stored as null (a plain --- separator). */
-  setColAlign(c, val) {
+  setColAlign(cols, val) {
     this.flushEdit();
-    this.colAlign[c] = val === "left" ? null : val;
+    const list = Array.isArray(cols) ? cols : [cols];
+    list.forEach((c) => {
+      this.colAlign[c] = val === "left" ? null : val;
+    });
     this.applyAlign();
     this.dirty = true;
     this.save();
