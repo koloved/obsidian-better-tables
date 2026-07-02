@@ -507,6 +507,12 @@ class TableWidget {
       // Editing a DIFFERENT cell: commit that edit first, then treat this press
       // normally (click → select the cell, drag → select a range).
       if (this.editingCell) this.finishEditing();
+      // Shift+click with an existing selection: extend it from its anchor to
+      // this cell (spreadsheet behavior) instead of starting over.
+      if (e.shiftKey && this.cellSel) {
+        this.updateCellSelection(r, c);
+        return;
+      }
       // A press here is ambiguous: a click selects the cell, a drag selects a
       // range of cells. beginCellPointer resolves it on move/up.
       this.beginCellPointer(td, r, c, e);
@@ -667,6 +673,23 @@ class TableWidget {
         const { r0, c0 } = this.cellSel;
         const td = this.tableEl.rows[r0] && this.tableEl.rows[r0].cells[c0];
         if (td) this.editCell(td, r0, c0, true);
+      } else if (ev.key.length === 1 && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+        // Type-to-edit: typing on a selected cell starts editing and REPLACES
+        // its content with the typed character (spreadsheet behavior).
+        ev.preventDefault();
+        ev.stopPropagation();
+        const { r0, c0 } = this.cellSel;
+        const td = this.tableEl.rows[r0] && this.tableEl.rows[r0].cells[c0];
+        if (!td) return;
+        this.editCell(td, r0, c0, true);
+        td.setText(ev.key);
+        const range = this.doc.createRange();
+        range.selectNodeContents(td);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel && sel.removeAllRanges();
+        sel && sel.addRange(range);
+        window.requestAnimationFrame(() => this.layout());
       }
     };
     this.doc.addEventListener("keydown", this.cellSelKey, true);
