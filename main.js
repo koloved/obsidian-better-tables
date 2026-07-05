@@ -135,6 +135,14 @@ class TableWidget {
     return this.editingCell !== null;
   }
 
+  /** Reading view is display-only: no live editor sits behind the block, so the
+   *  table renders static (no chrome, no click-to-edit). Live Preview places the
+   *  block inside a `.markdown-source-view` (CodeMirror) editor; reading view /
+   *  export / PDF do not. */
+  isReadingView() {
+    return !this.el.closest(".markdown-source-view");
+  }
+
   loadSizes() {
     const cols = this.cells[0].length;
     const rows = this.cells.length;
@@ -175,6 +183,8 @@ class TableWidget {
     this.el.empty();
     this.cellSelBox = null; // detached with the old root; recreated on demand
     this.el.addClass("tk-block");
+    this.readOnly = this.isReadingView();
+    this.el.toggleClass("cp-table-readonly", this.readOnly);
 
     const scroll = this.el.createDiv({ cls: "cp-table-scroll" });
     const root = (this.rootEl = scroll.createDiv({ cls: "cp-table-root" }));
@@ -191,6 +201,10 @@ class TableWidget {
     });
     this.applySizes();
     this.applyAlign();
+
+    // Reading view: static table only. Cells are rendered above with no edit
+    // listeners (see bindCell); skip all the interactive chrome below.
+    if (this.readOnly) return;
 
     this.addColEl = root.createDiv({ cls: "cp-table-add cp-table-add-col", attr: { "aria-label": "Add column" } });
     setIcon(this.addColEl, "plus");
@@ -494,6 +508,8 @@ class TableWidget {
   bindCell(td, r, c, text) {
     td.setText(text);
     if (r === 0) td.addClass("cp-table-header");
+    // Reading view: display-only cell, no editing/selection/align listeners.
+    if (this.readOnly) return;
     // Use mousedown (not pointerdown): CodeMirror manages focus on mousedown,
     // so this is the event we must intercept to stop the editor from yanking
     // focus back out of the cell — which was eating the first Tab/Enter.
