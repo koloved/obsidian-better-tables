@@ -1,6 +1,6 @@
 "use strict";
 
-const { Plugin, Notice, setIcon, Menu, PluginSettingTab, Setting } = require("obsidian");
+const { Plugin, Notice, setIcon, Menu, PluginSettingTab, Setting, MarkdownRenderer } = require("obsidian");
 
 const DEFAULT_SETTINGS = {
   // false: click selects a cell, a second click (or Enter) edits it.
@@ -12,11 +12,76 @@ const TABLE_CELL_W = 140;
 const TABLE_CELL_H = 48;
 const MIN_W = 50;
 const MIN_H = 28;
+const MAX_LINK_SUGGESTIONS = 20;
 
 const SIZE_RE = /^\s*<!--\s*tk:cols=([\d.,\s]*);rows=([\d.,\s]*)\s*-->\s*$/;
 
 function sumArr(a) {
   return a.reduce((s, n) => s + n, 0);
+}
+
+/** Split a markdown table row on cell separators, while leaving escaped pipes,
+ *  wikilink aliases like [[Page|Alias]], inline code, and markdown link text
+ *  intact. The serializer still escapes pipes, but this keeps hand-written
+ *  table blocks from falling apart. */
+function splitTableRow(inner) {
+  const cells = [];
+  let cur = "";
+  let inCode = false;
+  let mathFence = null;
+  let wikiDepth = 0;
+  let bracketDepth = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    const prev = inner[i - 1];
+    const next = inner[i + 1];
+
+    if (ch === "`" && prev !== "\\" && !mathFence) inCode = !inCode;
+    if (!inCode) {
+      if (ch === "$" && prev !== "\\") {
+        const fence = next === "$" ? "$$" : "$";
+        if (!mathFence) {
+          mathFence = fence;
+          cur += fence;
+          if (fence === "$$") i++;
+          continue;
+        }
+        if (mathFence === fence) {
+          mathFence = null;
+          cur += fence;
+          if (fence === "$$") i++;
+          continue;
+        }
+      }
+      if (mathFence) {
+        cur += ch;
+        continue;
+      }
+      if (ch === "[" && next === "[") {
+        wikiDepth++;
+        cur += ch + next;
+        i++;
+        continue;
+      }
+      if (ch === "]" && next === "]" && wikiDepth > 0) {
+        wikiDepth--;
+        cur += ch + next;
+        i++;
+        continue;
+      }
+      if (ch === "[" && prev !== "\\" && wikiDepth === 0) bracketDepth++;
+      else if (ch === "]" && prev !== "\\" && bracketDepth > 0) bracketDepth--;
+    }
+
+    if (ch === "|" && prev !== "\\" && !inCode && wikiDepth === 0 && bracketDepth === 0) {
+      cells.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur);
+  return cells;
 }
 
 /** Parse a GitHub-style markdown table into a 2-D array of cell strings.
@@ -28,8 +93,7 @@ function parseMdTable(text) {
     if (/^\s*\|[\s:|-]+\|\s*$/.test(line) && line.includes("-")) continue;
     const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
     rows.push(
-      inner
-        .split(/(?<!\\)\|/)
+      splitTableRow(inner)
         // Decode escaped pipes and our <br> line-break encoding back into the
         // raw multi-line text the cell edits as.
         .map((c) => c.trim().replace(/\\\|/g, "|").replace(/<br\s*\/?>/gi, "\n"))
@@ -136,11 +200,17 @@ class TableWidget {
   }
 
   /** Reading view is display-only: no live editor sits behind the block, so the
-   *  table renders static (no chrome, no click-to-edit). Live Preview places the
-   *  block inside a `.markdown-source-view` (CodeMirror) editor; reading view /
-   *  export / PDF do not. */
+   *  table renders static (no chrome, no click-to-edit). Obsidian has changed
+   *  the exact Live Preview wrapper classes over time, so prefer known
+   *  CodeMirror/editing ancestors before falling back to preview/export. */
   isReadingView() {
-    return !this.el.closest(".markdown-source-view");
+    const editRoot = this.el.closest(
+      ".markdown-source-view, .cm-editor, .cm-content, .cm-contentContainer, .cm-scroller, .cm-preview-code-block, .cm-embed-block"
+    );
+    if (editRoot) return false;
+    const previewRoot = this.el.closest(".markdown-reading-view, .markdown-preview-view");
+    if (previewRoot) return true;
+    return true;
   }
 
   loadSizes() {
@@ -175,6 +245,7 @@ class TableWidget {
   render() {
     const parsed = parseMdTable(this.source);
     if (parsed) this.cells = parsed;
+    this.closeInternalLinkSuggest();
     this.editingCell = null;
     this.loadSizes();
     this.loadAlign();
@@ -502,11 +573,33 @@ class TableWidget {
   }
 
   // --- cell editing ---
+  async renderCellMarkdown(td, text) {
+    td._btRawText = text;
+    td._btRenderVersion = (td._btRenderVersion || 0) + 1;
+    const version = td._btRenderVersion;
+    td.empty();
+    if (!text) return;
+
+    const target = td.createDiv({ cls: "cp-cell-markdown" });
+    try {
+      if (MarkdownRenderer.render) {
+        await MarkdownRenderer.render(this.plugin.app, text, target, this.ctx.sourcePath || "", this.plugin);
+      } else {
+        await MarkdownRenderer.renderMarkdown(text, target, this.ctx.sourcePath || "", this.plugin);
+      }
+      if (td._btRenderVersion !== version || this.editingCell === td) return;
+      this.layout();
+    } catch (err) {
+      console.error("Better Tables: cell markdown render failed", err);
+      if (td._btRenderVersion === version && this.editingCell !== td) td.setText(text);
+    }
+  }
+
   /** Wire up a freshly created <td>: its text, header style, and the
    *  click-to-edit / re-layout-on-input listeners. Shared by render() and
    *  appendRowAndEdit() so both build identical cells. */
   bindCell(td, r, c, text) {
-    td.setText(text);
+    this.renderCellMarkdown(td, text);
     if (r === 0) td.addClass("cp-table-header");
     // Reading view: display-only cell, no editing/selection/align listeners.
     if (this.readOnly) return;
@@ -515,6 +608,7 @@ class TableWidget {
     // focus back out of the cell — which was eating the first Tab/Enter.
     td.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
+      if ((e.metaKey || e.ctrlKey) && e.target && e.target.closest && e.target.closest("a")) return;
       // Already editing this cell: leave the event alone so native caret
       // placement and drag-to-select-text work.
       if (this.editingCell === td) return;
@@ -533,7 +627,10 @@ class TableWidget {
       // range of cells. beginCellPointer resolves it on move/up.
       this.beginCellPointer(td, r, c, e);
     });
-    td.addEventListener("input", () => window.requestAnimationFrame(() => this.layout()));
+    td.addEventListener("input", () => {
+      this.refreshInternalLinkSuggest(td);
+      window.requestAnimationFrame(() => this.layout());
+    });
     // Right-click a cell → set its column's text alignment (markdown only
     // supports per-column alignment, so this applies to the whole column).
     td.addEventListener("contextmenu", (e) => {
@@ -829,12 +926,181 @@ class TableWidget {
     return r >= rA && r <= rB && c >= cA && c <= cB;
   }
 
+  selectionOffsets(td) {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    if (!td.contains(range.startContainer) || !td.contains(range.endContainer)) return null;
+    const pre = range.cloneRange();
+    pre.selectNodeContents(td);
+    pre.setEnd(range.startContainer, range.startOffset);
+    return { start: pre.toString().length, end: pre.toString().length + range.toString().length };
+  }
+
+  setCellTextAndCaret(td, text, caret) {
+    td.setText(text);
+    td.focus();
+    const node = td.firstChild || td.appendChild(this.doc.createTextNode(""));
+    const pos = Math.max(0, Math.min(caret, node.nodeValue.length));
+    const range = this.doc.createRange();
+    range.setStart(node, pos);
+    range.collapse(true);
+    const sel = window.getSelection();
+    sel && sel.removeAllRanges();
+    sel && sel.addRange(range);
+    window.requestAnimationFrame(() => this.layout());
+  }
+
+  nativeMarkdownLink(file) {
+    const sourcePath = this.ctx.sourcePath || "";
+    const fm = this.plugin.app.fileManager;
+    if (fm && fm.generateMarkdownLink) return fm.generateMarkdownLink(file, sourcePath);
+    return `[[${file.basename}]]`;
+  }
+
+  linkTriggerInfo(td) {
+    const pos = this.selectionOffsets(td);
+    if (!pos || pos.start !== pos.end) return null;
+    const text = this.cellText(td);
+    const before = text.slice(0, pos.start);
+    const start = before.lastIndexOf("[[");
+    if (start === -1) return null;
+    const query = before.slice(start + 2);
+    if (query.includes("]]") || query.includes("\n")) return null;
+    if (/[#^|]/.test(query)) return null;
+    return { start, end: pos.end, query, text };
+  }
+
+  linkSuggestFiles(query) {
+    const q = query.trim().toLowerCase();
+    const files = this.plugin.app.vault.getFiles ? this.plugin.app.vault.getFiles() : this.plugin.app.vault.getMarkdownFiles();
+    const scored = [];
+    for (const file of files) {
+      const title = file.basename || file.name || file.path;
+      const path = file.path || title;
+      const hay = `${title}\n${path}`.toLowerCase();
+      let score = 0;
+      if (!q) score = 1;
+      else if (title.toLowerCase() === q) score = 100;
+      else if (title.toLowerCase().startsWith(q)) score = 80;
+      else if (path.toLowerCase().startsWith(q)) score = 70;
+      else if (hay.includes(q)) score = 50;
+      else {
+        let at = 0;
+        for (const ch of q) {
+          at = hay.indexOf(ch, at);
+          if (at === -1) break;
+          at++;
+        }
+        if (at !== -1) score = 20;
+      }
+      if (score) scored.push({ file, score, title, path });
+    }
+    scored.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+    return scored.slice(0, MAX_LINK_SUGGESTIONS).map((x) => x.file);
+  }
+
+  positionLinkSuggest() {
+    if (!this.linkSuggestEl || !this.linkSuggestTd) return;
+    const rect = this.linkSuggestTd.getBoundingClientRect();
+    const vw = this.doc.defaultView ? this.doc.defaultView.innerWidth : window.innerWidth;
+    const vh = this.doc.defaultView ? this.doc.defaultView.innerHeight : window.innerHeight;
+    const width = Math.min(Math.max(rect.width, 320), 520, vw - 24);
+    const left = Math.max(12, Math.min(rect.left, vw - width - 12));
+    const below = rect.bottom + 4;
+    const maxHeight = Math.max(160, Math.min(360, vh - below - 12));
+    this.linkSuggestEl.style.left = `${left}px`;
+    this.linkSuggestEl.style.top = `${below}px`;
+    this.linkSuggestEl.style.width = `${width}px`;
+    this.linkSuggestEl.style.maxHeight = `${maxHeight}px`;
+  }
+
+  renderLinkSuggest(td, info) {
+    this.linkSuggestTd = td;
+    if (!this.linkSuggestInfo || this.linkSuggestInfo.query !== info.query) this.linkSuggestIndex = 0;
+    this.linkSuggestInfo = info;
+    this.linkSuggestItems = this.linkSuggestFiles(info.query);
+    this.linkSuggestIndex = Math.min(this.linkSuggestIndex || 0, Math.max(0, this.linkSuggestItems.length - 1));
+
+    if (!this.linkSuggestEl) {
+      const el = (this.linkSuggestEl = this.doc.body.createDiv({ cls: "suggestion-container better-tables-link-suggest" }));
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      this.linkSuggestOutside = (ev) => {
+        if (ev.target === td || td.contains(ev.target) || el.contains(ev.target)) return;
+        this.closeInternalLinkSuggest();
+      };
+      this.doc.addEventListener("mousedown", this.linkSuggestOutside, true);
+    }
+
+    const el = this.linkSuggestEl;
+    el.empty();
+    this.linkSuggestItems.forEach((file, i) => {
+      const item = el.createDiv({ cls: `suggestion-item${i === this.linkSuggestIndex ? " is-selected" : ""}` });
+      item.createDiv({ cls: "suggestion-title", text: file.basename || file.name || file.path });
+      const folder = (file.parent && file.parent.path && file.parent.path !== "/" ? `${file.parent.path}/` : "") || "";
+      item.createDiv({ cls: "suggestion-note", text: folder });
+      item.addEventListener("mouseenter", () => {
+        this.linkSuggestIndex = i;
+        this.renderLinkSuggest(td, this.linkSuggestInfo);
+      });
+      item.addEventListener("click", () => this.chooseInternalLink(file));
+    });
+    if (!this.linkSuggestItems.length) el.createDiv({ cls: "suggestion-item is-disabled", text: "No matches" });
+    this.positionLinkSuggest();
+  }
+
+  refreshInternalLinkSuggest(td) {
+    if (this.editingCell !== td) return;
+    const info = this.linkTriggerInfo(td);
+    if (!info) {
+      this.closeInternalLinkSuggest();
+      return;
+    }
+    this.renderLinkSuggest(td, info);
+  }
+
+  moveInternalLinkSuggest(dir) {
+    if (!this.linkSuggestEl || !this.linkSuggestItems || !this.linkSuggestItems.length) return;
+    this.linkSuggestIndex = (this.linkSuggestIndex + dir + this.linkSuggestItems.length) % this.linkSuggestItems.length;
+    this.renderLinkSuggest(this.linkSuggestTd, this.linkSuggestInfo);
+  }
+
+  chooseInternalLink(file) {
+    const td = this.linkSuggestTd;
+    const info = td && this.linkTriggerInfo(td);
+    if (!td || !info) return;
+    const link = this.nativeMarkdownLink(file);
+    const text = `${info.text.slice(0, info.start)}${link}${info.text.slice(info.end)}`;
+    this.closeInternalLinkSuggest();
+    this.setCellTextAndCaret(td, text, info.start + link.length);
+  }
+
+  closeInternalLinkSuggest() {
+    if (this.linkSuggestOutside) {
+      this.doc.removeEventListener("mousedown", this.linkSuggestOutside, true);
+      this.linkSuggestOutside = null;
+    }
+    if (this.linkSuggestEl) {
+      this.linkSuggestEl.detach();
+      this.linkSuggestEl = null;
+    }
+    this.linkSuggestTd = null;
+    this.linkSuggestInfo = null;
+    this.linkSuggestItems = [];
+    this.linkSuggestIndex = 0;
+  }
+
   editCell(td, r, c, fromKeyboard) {
     if (this.editingCell === td) return;
     this.clearCellSelection();
     this.finishEditing();
     this.editingCell = td;
     this.editingPos = { r, c };
+    td._btRenderVersion = (td._btRenderVersion || 0) + 1;
+    td.setText(this.cells[r][c] || "");
     td.contentEditable = "true";
     td.addClass("is-editing-cell");
     // Always take keyboard focus so the cell captures the very first Tab/Enter.
@@ -852,13 +1118,11 @@ class TableWidget {
     // Blur commits and saves — unless the edit was already committed (e.g. by a
     // structural action or keyboard navigation), in which case editingCell has
     // been cleared and this is a no-op so we never issue a racing save.
-    td.addEventListener(
-      "blur",
-      () => {
-        if (this.editingCell === td) this.commitCell(td, r, c, true);
-      },
-      { once: true }
-    );
+    const onBlur = () => {
+      this.closeInternalLinkSuggest();
+      if (this.editingCell === td) this.commitCell(td, r, c, true);
+    };
+    td.addEventListener("blur", onBlur, { once: true });
     // Bind navigation keys once per cell so repeated edits don't stack handlers
     // (which would double-fire Tab/Enter navigation).
     if (!td._btKeyBound) {
@@ -866,6 +1130,28 @@ class TableWidget {
       td.addEventListener("keydown", (e) => {
         if (this.editingCell !== td) return;
         const mod = e.metaKey || e.ctrlKey;
+        if (this.linkSuggestEl) {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            e.stopPropagation();
+            this.moveInternalLinkSuggest(e.key === "ArrowDown" ? 1 : -1);
+            return;
+          }
+          if (e.key === "Enter" || e.key === "Tab") {
+            if (this.linkSuggestItems && this.linkSuggestItems.length) {
+              e.preventDefault();
+              e.stopPropagation();
+              this.chooseInternalLink(this.linkSuggestItems[this.linkSuggestIndex || 0]);
+              return;
+            }
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            this.closeInternalLinkSuggest();
+            return;
+          }
+        }
         // Cmd/Ctrl+A — select all text in THIS cell (not the whole note).
         if (mod && (e.key === "a" || e.key === "A")) {
           e.preventDefault();
@@ -1053,6 +1339,7 @@ class TableWidget {
     // (which cancelled the first Tab/Enter).
     if (this.editingCell === td) this.editingCell = null;
     this.editingPos = null;
+    this.closeInternalLinkSuggest();
     td.contentEditable = "false";
     td.removeClass("is-editing-cell");
     const v = this.cellText(td).trim();
@@ -1060,6 +1347,7 @@ class TableWidget {
       this.cells[r][c] = v;
       this.dirty = true;
     }
+    this.renderCellMarkdown(td, this.cells[r][c]);
     if (doSave) {
       if (this.dirty) this.save();
       else this.layout();
