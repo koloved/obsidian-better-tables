@@ -41,31 +41,33 @@
 	display: inline-block;
 }
 
-/* Layout-critical resets are forced with !important so arbitrary themes can't
-   break the absolute-positioned chrome. Many themes restyle markdown tables
-   (e.g. `table { display: block; overflow-x: auto; max-width: 100% }` for
-   responsive layouts), which would otherwise wreck the geometry math. */
-.cp-table {
-	display: table !important;
-	table-layout: fixed !important;
-	border-collapse: collapse !important;
-	border-spacing: 0 !important;
-	width: auto !important;
-	max-width: none !important;
-	margin: 0 !important;
+/* Layout-critical resets. Many themes restyle markdown tables (e.g.
+   `table { display: block; overflow-x: auto; max-width: 100% }` for responsive
+   layouts), which would otherwise wreck the absolute-positioned chrome's
+   geometry math. Rather than force these with !important, we qualify each rule
+   with the .cp-table-root ancestor: `.cp-table-root .cp-table` (0,2,0) outranks
+   theme rules like `.markdown-rendered table` (0,1,1) on specificity alone. */
+.cp-table-root .cp-table {
+	display: table;
+	table-layout: fixed;
+	border-collapse: collapse;
+	border-spacing: 0;
+	width: auto;
+	max-width: none;
+	margin: 0;
 	background: var(--background-primary);
 	box-shadow: none;
 }
 
-.cp-table tr {
-	display: table-row !important;
+.cp-table-root .cp-table tr {
+	display: table-row;
 }
 
-.cp-table td {
-	display: table-cell !important;
-	box-sizing: border-box !important;
+.cp-table-root .cp-table td {
+	display: table-cell;
+	box-sizing: border-box;
 	border: 1px solid var(--background-modifier-border);
-	padding: 4px 8px !important;
+	padding: 4px 8px;
 	vertical-align: top;
 	font-size: var(--font-text-size);
 	line-height: var(--line-height-normal, 1.5);

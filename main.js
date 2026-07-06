@@ -1,6 +1,6 @@
 "use strict";
 
-const { Plugin, Notice, setIcon, Menu, PluginSettingTab, Setting, MarkdownRenderer } = require("obsidian");
+const { Plugin, Notice, setIcon, Menu, PluginSettingTab, Setting, MarkdownRenderer, Component, MarkdownRenderChild } = require("obsidian");
 
 const DEFAULT_SETTINGS = {
   // false: click selects a cell, a second click (or Enter) edits it.
@@ -190,11 +190,30 @@ class TableWidget {
     this.cellSelOutside = null;
     this.cellSelKey = null;
     this.cellSelBox = null;
+    // Owns the child components spawned by markdown cell rendering (embeds,
+    // dataview, etc.) so they unload when the widget re-renders or tears down,
+    // instead of leaking onto the plugin for its whole lifetime.
+    this.mdComponent = null;
   }
 
   get doc() {
     return this.el.ownerDocument;
   }
+
+  /** Tear down everything this widget owns. Called when Obsidian unloads the
+   *  block (re-render, view close, plugin unload) via the render child below. */
+  destroy() {
+    if (this.resizeObs) {
+      this.resizeObs.disconnect();
+      this.resizeObs = null;
+    }
+    this.closeInternalLinkSuggest();
+    if (this.mdComponent) {
+      this.mdComponent.unload();
+      this.mdComponent = null;
+    }
+  }
+
   isEditing() {
     return this.editingCell !== null;
   }
@@ -253,6 +272,11 @@ class TableWidget {
     this.clearCellSelection();
     this.el.empty();
     this.cellSelBox = null; // detached with the old root; recreated on demand
+    // Fresh markdown host: unload the previous render's child components (the
+    // old cell DOM is about to be discarded by empty()) and start a new one.
+    if (this.mdComponent) this.mdComponent.unload();
+    this.mdComponent = new Component();
+    this.mdComponent.load();
     this.el.addClass("tk-block");
     this.readOnly = this.isReadingView();
     this.el.toggleClass("cp-table-readonly", this.readOnly);
@@ -582,10 +606,11 @@ class TableWidget {
 
     const target = td.createDiv({ cls: "cp-cell-markdown" });
     try {
+      const owner = this.mdComponent || this.plugin;
       if (MarkdownRenderer.render) {
-        await MarkdownRenderer.render(this.plugin.app, text, target, this.ctx.sourcePath || "", this.plugin);
+        await MarkdownRenderer.render(this.plugin.app, text, target, this.ctx.sourcePath || "", owner);
       } else {
-        await MarkdownRenderer.renderMarkdown(text, target, this.ctx.sourcePath || "", this.plugin);
+        await MarkdownRenderer.renderMarkdown(text, target, this.ctx.sourcePath || "", owner);
       }
       if (td._btRenderVersion !== version || this.editingCell === td) return;
       this.layout();
@@ -1722,7 +1747,14 @@ module.exports = class BetterTablesPlugin extends Plugin {
     this.addSettingTab(new BetterTablesSettingTab(this.app, this));
 
     this.registerMarkdownCodeBlockProcessor("table", (source, el, ctx) => {
-      new TableWidget(this, source, el, ctx).render();
+      const widget = new TableWidget(this, source, el, ctx);
+      // Tie the widget's lifetime to the block: when Obsidian unloads this
+      // section (re-render, pane close, plugin unload) the child unloads and we
+      // release the ResizeObserver, link-suggest listeners, and markdown host.
+      const child = new MarkdownRenderChild(el);
+      child.register(() => widget.destroy());
+      ctx.addChild(child);
+      widget.render();
     });
 
     // When a table cell is being edited, Obsidian shows its native editor menu.
