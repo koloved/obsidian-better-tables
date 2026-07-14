@@ -14,7 +14,7 @@ const MIN_W = 50;
 const MIN_H = 28;
 const MAX_LINK_SUGGESTIONS = 20;
 
-const SIZE_RE = /^\s*<!--\s*tk:cols=([\d.,\s]*);rows=([\d.,\s]*)\s*-->\s*$/;
+const SIZE_RE = /^\s*<!--\s*tk:cols=([\d.,\s]*);rows=([\d.,\s]*)(?:;fit=(\d))?\s*-->\s*$/;
 
 function sumArr(a) {
   return a.reduce((s, n) => s + n, 0);
@@ -150,7 +150,7 @@ function parseSizes(text) {
     if (m) {
       const nums = (s) =>
         s.split(",").map((n) => Number(n.trim())).filter((n) => Number.isFinite(n) && n > 0);
-      return { cols: nums(m[1]), rows: nums(m[2]) };
+      return { cols: nums(m[1]), rows: nums(m[2]), fit: m[3] === "1" };
     }
   }
   return null;
@@ -194,6 +194,9 @@ class TableWidget {
     // dataview, etc.) so they unload when the widget re-renders or tears down,
     // instead of leaking onto the plugin for its whole lifetime.
     this.mdComponent = null;
+    // When true the table stretches to fill the page content width instead of
+    // being sized by its column pixels. Toggled by the button in the top-right.
+    this.pageWidth = false;
   }
 
   get doc() {
@@ -242,6 +245,9 @@ class TableWidget {
     this.rowH = Array.isArray(pr) && pr.length === rows ? pr.map((n) => Math.max(MIN_H, n)) : [];
     if (this.colW.length !== cols) this.colW = Array(cols).fill(TABLE_CELL_W);
     if (this.rowH.length !== rows) this.rowH = Array(rows).fill(TABLE_CELL_H);
+    // Restore page-width mode from the stored size comment so it survives
+    // re-renders triggered by column/row resizes or other saves.
+    this.pageWidth = !!(stored && stored.fit);
   }
 
   loadAlign() {
@@ -382,6 +388,23 @@ class TableWidget {
       this.deleteTable();
     });
 
+    // Page-width toggle: stretches table to fill content width
+    this.pageWidthBtn = this.el.createDiv({
+      cls: "cp-page-width-btn clickable-icon",
+      attr: { "aria-label": "Fit table to page width" }
+    });
+    setIcon(this.pageWidthBtn, "maximize-2");
+    if (this.pageWidth) {
+      this.pageWidthBtn.addClass("is-active");
+      this.rootEl.addClass("cp-table-fit-page");
+    }
+    this.pageWidthBtn.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      this.togglePageWidth();
+    });
+
     this.bindChromeTracker();
     this.hideChrome();
     // Reposition the chrome whenever the table's geometry changes — e.g. when
@@ -494,14 +517,34 @@ class TableWidget {
     line.show();
   }
 
+  /** Toggle the table between pixel-width and page-fill modes. */
+  togglePageWidth() {
+    this.pageWidth = !this.pageWidth;
+    if (this.pageWidthBtn) this.pageWidthBtn.toggleClass("is-active", this.pageWidth);
+    if (this.rootEl) this.rootEl.toggleClass("cp-table-fit-page", this.pageWidth);
+    this.applySizes();
+    window.requestAnimationFrame(() => this.layout());
+    this.dirty = true;
+    this.save();
+  }
+
   // --- sizing ---
   applySizes() {
     const t = this.tableEl;
     if (!t) return;
-    t.querySelectorAll("col").forEach((c, i) => {
-      c.style.width = `${this.colW[i] || TABLE_CELL_W}px`;
-    });
-    t.style.width = `${sumArr(this.colW)}px`;
+    if (this.pageWidth) {
+      const total = sumArr(this.colW);
+      t.querySelectorAll("col").forEach((c, i) => {
+        const pct = total > 0 ? ((this.colW[i] / total) * 100).toFixed(4) : (100 / this.colW.length).toFixed(4);
+        c.style.width = `${pct}%`;
+      });
+      t.style.width = "";
+    } else {
+      t.querySelectorAll("col").forEach((c, i) => {
+        c.style.width = `${this.colW[i] || TABLE_CELL_W}px`;
+      });
+      t.style.width = `${sumArr(this.colW)}px`;
+    }
     Array.from(t.rows).forEach((tr, r) => {
       tr.style.height = `${this.rowH[r] || TABLE_CELL_H}px`;
     });
@@ -579,7 +622,15 @@ class TableWidget {
       const startSize = axis === "col" ? this.colW[index] : this.rowH[index];
       const onMove = (ev) => {
         if (axis === "col") {
-          this.colW[index] = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
+          const newSize = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
+          const delta = newSize - this.colW[index];
+          this.colW[index] = newSize;
+          // Page-width mode: adjust the adjacent column so the total stays
+          // constant and the table doesn't jitter while you drag.
+          if (this.pageWidth) {
+            const adjIdx = index + 1 < this.colW.length ? index + 1 : index - 1;
+            if (adjIdx >= 0) this.colW[adjIdx] = Math.max(MIN_W, this.colW[adjIdx] - delta);
+          }
         } else {
           this.rowH[index] = Math.max(MIN_H, Math.round(startSize + (ev.clientY - startY)));
         }
@@ -668,18 +719,35 @@ class TableWidget {
       }
       e.preventDefault();
       e.stopPropagation();
-      const menu = new Menu();
-      // If this cell is part of a drag selection, offer block actions first.
-      let cols = [c];
-      if (this.cellInSelection(r, c)) {
-        menu.addItem((i) => i.setTitle("Copy").setIcon("copy").onClick(() => this.copyCellSelection()));
-        menu.addItem((i) => i.setTitle("Clear contents").setIcon("eraser").onClick(() => this.clearSelectedCells()));
-        menu.addSeparator();
-        // Align every column the selection spans, not just the one clicked.
-        const { cA, cB } = this.selRect();
-        cols = [];
-        for (let ci = cA; ci <= cB; ci++) cols.push(ci);
+      // Capture selection data NOW (before the menu click clears cellSel via
+      // cellSelOutside). The menu click fires pointerdown on the menu element
+      // which is outside rootEl, triggering clearCellSelection.
+      var hasSel = this.cellInSelection(r, c);
+      var selData = null;
+      if (hasSel && this.cellSel) {
+        var rect = this.selRect();
+        selData = {
+          rA: rect.rA, rB: rect.rB, cA: rect.cA, cB: rect.cB,
+          cols: [] 
+        };
+        for (var ci = rect.cA; ci <= rect.cB; ci++) selData.cols.push(ci);
       }
+      var capturedR = r, capturedC = c;
+      var self2 = this;
+      const menu = new Menu();
+      var cols = [c];
+      if (hasSel && selData) {
+        cols = selData.cols;
+        menu.addItem(function(i) { return i.setTitle("Copy").setIcon("copy").onClick(function() { self2._copyCellsFromRect(selData.rA, selData.rB, selData.cA, selData.cB); }); });
+        menu.addItem(function(i) { return i.setTitle("Clear contents").setIcon("eraser").onClick(function() { self2._clearCellsFromRect(selData.rA, selData.rB, selData.cA, selData.cB); }); });
+        menu.addSeparator();
+      } else {
+        menu.addItem(function(i) { return i.setTitle("Copy").setIcon("copy").onClick(function() { self2._copyToClipboard(self2.cells[capturedR][capturedC] || ""); }); });
+      }
+      menu.addItem(function(i) {
+        return i.setTitle("Paste").setIcon("clipboard-paste").onClick(function() { self2.pasteIntoCell(capturedR, capturedC); });
+      });
+      menu.addSeparator();
       this.addAlignItems(menu, cols);
       menu.showAtMouseEvent(e);
     });
@@ -803,7 +871,15 @@ class TableWidget {
         this.clearCellSelection();
       } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === "c" || ev.key === "C")) {
         ev.preventDefault();
+        ev.stopPropagation();
         this.copyCellSelection();
+      } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === "v" || ev.key === "V")) {
+        // Ctrl+V on selected cell(s): paste into the anchor cell
+        ev.preventDefault();
+        ev.stopPropagation();
+        var self5 = this;
+        var r0 = this.cellSel.r0, c0 = this.cellSel.c0;
+        self5.pasteIntoCell(r0, c0);
       } else if (ev.key === "Enter" || ev.key === "F2") {
         // Edit the selection's anchor cell, caret at the end.
         ev.preventDefault();
@@ -930,8 +1006,31 @@ class TableWidget {
     }
   }
 
+  /** Copy cells in a rectangle to clipboard. Doesn't depend on this.cellSel. */
+  _copyCellsFromRect(rA, rB, cA, cB) {
+    var lines = [];
+    for (var ri = rA; ri <= rB; ri++) {
+      var row = [];
+      for (var ci = cA; ci <= cB; ci++) row.push(this.cells[ri][ci]);
+      lines.push(row.join("\t"));
+    }
+    this._copyToClipboard(lines.join("\n"));
+  }
+
+  /** Clear cells in a rectangle. Doesn't depend on this.cellSel. */
+  _clearCellsFromRect(rA, rB, cA, cB) {
+    var changed = false;
+    for (var ri = rA; ri <= rB; ri++) {
+      for (var ci = cA; ci <= cB; ci++) {
+        if (this.cells[ri][ci] !== "") { this.cells[ri][ci] = ""; changed = true; }
+      }
+    }
+    if (changed) { this.dirty = true; this.save(); }
+  }
+
   /** Copy the selection to the clipboard as tab-separated rows. */
   copyCellSelection() {
+    console.log("BT copyCellSelection called, cellSel=", this.cellSel);
     if (!this.cellSel) return;
     const { rA, rB, cA, cB } = this.selRect();
     const lines = [];
@@ -940,8 +1039,86 @@ class TableWidget {
       for (let ci = cA; ci <= cB; ci++) row.push(this.cells[ri][ci]);
       lines.push(row.join("\t"));
     }
-    navigator.clipboard.writeText(lines.join("\n"));
-    new Notice("Better Tables: cells copied.");
+    this._copyToClipboard(lines.join("\n"));
+  }
+
+  /** Paste clipboard text at cursor in an editing cell. Called from keydown. */
+  async _pasteAtCursor(td) {
+    console.log("BT _pasteAtCursor called, td=", td && td.textContent && td.textContent.substring(0,20));
+    try {
+      var text = await navigator.clipboard.readText();
+      console.log("BT _pasteAtCursor clipboard text length=", text ? text.length : 0);
+      if (text) {
+        var ok = this.doc.execCommand("insertText", false, text);
+        console.log("BT _pasteAtCursor execCommand insertText=", ok);
+        window.requestAnimationFrame(function() { this.layout(); }.bind(this));
+      }
+    } catch (err) {
+      console.error("Better Tables: _pasteAtCursor error", err);
+    }
+  }
+
+  /** Reliable clipboard write. */
+  _copyToClipboard(text) {
+    console.log("BT _copyToClipboard called, text length=", text ? text.length : 0, "text=", (text||"").substring(0,30));
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function() {
+        console.log("BT _copyToClipboard writeText SUCCESS");
+        new Notice("Better Tables: cells copied.");
+      }).catch(function(e) {
+        console.error("BT _copyToClipboard writeText FAILED", e);
+        new Notice("Better Tables: copy failed.");
+      });
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); new Notice("Better Tables: cells copied."); }
+      catch (e2) { new Notice("Better Tables: copy failed."); }
+      document.body.removeChild(ta);
+    }
+  }
+
+  /** Copy a single cell's text to clipboard (no selection needed). */
+  copyCell(r, c) {
+    console.log("BT copyCell called r=", r, "c=", c, "val=", (this.cells[r][c]||"").substring(0,20));
+    this._copyToClipboard(this.cells[r][c] || "");
+  }
+
+  /** Paste clipboard text into cell(s), splitting tabs/newlines. */
+  async pasteIntoCell(r, c) {
+    console.log("BT pasteIntoCell called r=", r, "c=", c);
+    try {
+      var text = await navigator.clipboard.readText();
+      console.log("BT pasteIntoCell clipboard text length=", text ? text.length : 0);
+      if (!text) return;
+      var rawLines = text.split("\n").map(function(l) { return l.charAt(l.length - 1) === "\r" ? l.slice(0, -1) : l; });
+      var lines = rawLines.length === 1 ? rawLines : rawLines.filter(function(l) { return l.trim() !== ""; });
+      if (!lines.length) return;
+      var rows = lines.map(function(l) { return l.split("\t"); });
+      var pasteRows = rows.length;
+      var pasteCols = Math.max.apply(null, rows.map(function(r) { return r.length; }));
+      while (this.cells.length < r + pasteRows) {
+        this.cells.push(this.cells[0].map(function() { return ""; }));
+        this.rowH.push(TABLE_CELL_H);
+      }
+      while (this.cells[0].length < c + pasteCols) {
+        this.cells.forEach(function(row) { row.push(""); });
+        this.colW.push(TABLE_CELL_W);
+        this.colAlign.push(null);
+      }
+      for (var dr = 0; dr < pasteRows; dr++)
+        for (var dc = 0; dc < pasteCols; dc++)
+          this.cells[r + dr][c + dc] = (rows[dr] && rows[dr][dc]) || "";
+      this.dirty = true;
+      this.save();
+    } catch (err) {
+      console.error("Better Tables: paste failed", err);
+      new Notice("Better Tables: failed to paste.");
+    }
   }
 
   /** True if (r,c) falls inside the current cell selection. */
@@ -1195,6 +1372,17 @@ class TableWidget {
           this.insertLineBreak(td);
           return;
         }
+        // Ctrl+V paste: handle ourselves so Obsidian doesn't intercept it.
+        if (mod && (e.key === "v" || e.key === "V")) {
+          console.log("BT keydown Ctrl+V detected");
+          e.preventDefault();
+          e.stopPropagation();
+          this._pasteAtCursor(td);
+          return;
+        }
+        // Let other standard modifier shortcuts (Ctrl+X cut, Ctrl+C copy,
+        // Ctrl+Z undo, etc.) pass through to the browser.
+        if (mod && !e.shiftKey) return;
         e.stopPropagation();
         if (e.key === "Escape") {
           e.preventDefault();
@@ -1230,6 +1418,19 @@ class TableWidget {
             e.preventDefault();
             this.editNeighbor(r, c, 1, 0);
           }
+        }
+      });
+    }
+    // Ensure copy from an editing cell writes plain text to the clipboard.
+    // (Paste is handled by the keydown handler via _pasteAtCursor.)
+    if (!td._btClipboardBound) {
+      td._btClipboardBound = true;
+      td.addEventListener("copy", (e) => {
+        var sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return;
+        var selectedText = sel.toString();
+        if (selectedText) {
+          e.clipboardData.setData("text/plain", selectedText);
         }
       });
     }
@@ -1682,7 +1883,7 @@ class TableWidget {
   // --- persistence: write the block back into the note file ---
   serialize() {
     const md = mdFromCells(this.cells, this.colAlign);
-    const sizeLine = `<!-- tk:cols=${this.colW.join(",")};rows=${this.rowH.join(",")} -->`;
+    const sizeLine = `<!-- tk:cols=${this.colW.join(",")};rows=${this.rowH.join(",")}${this.pageWidth ? ";fit=1" : ""} -->`;
     return `${md}\n${sizeLine}`;
   }
 

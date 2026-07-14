@@ -23,6 +23,40 @@
 	opacity: 1;
 }
 
+/* Page-width toggle button: sits left of the delete-table button. Same
+   reveal-on-hover behaviour as the delete button. */
+.cp-page-width-btn.cp-page-width-btn {
+	position: absolute;
+	top: var(--size-4-1, 4px);
+	right: 58px;
+	z-index: 10;
+	opacity: 0;
+	transition: opacity 100ms ease;
+}
+
+.tk-block:hover .cp-page-width-btn {
+	opacity: 1;
+}
+
+/* Active state: accent-coloured icon so it's obvious the mode is on. */
+.cp-page-width-btn.is-active {
+	color: var(--interactive-accent);
+	opacity: 1;
+}
+
+/* When fit-to-page is on, the root expands to fill the scroll container and
+   the table inside stretches to 100% of it. The inline width from applySizes()
+   is cleared, so these CSS rules take effect.
+   .cp-table-root.cp-table-fit-page (0,2,0) outranks .cp-table-root (0,1,0). */
+.cp-table-root.cp-table-fit-page {
+	display: block;
+	width: 100%;
+}
+
+.cp-table-root.cp-table-fit-page .cp-table {
+	width: 100%;
+}
+
 /* Scrollable, padded frame. Padding gives the reorder handles, insert dots,
    and delete button (which sit outside the table edges) room so they aren't
    clipped; overflow-x lets wide tables scroll horizontally. */
