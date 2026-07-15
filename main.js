@@ -1183,6 +1183,16 @@ class TableWidget {
       var text = await navigator.clipboard.readText();
       console.log("BT pasteIntoCell clipboard text length=", text ? text.length : 0);
       if (!text) return;
+      // Plain multi-line text without tabs → paste into the single cell
+      // with newlines encoded as <br>, rather than creating new rows.
+      if (text.indexOf("\t") === -1) {
+        var processed = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, "<br>");
+        this.cells[r][c] = processed;
+        this.dirty = true;
+        this.save();
+        return;
+      }
+      // Tab-separated data (e.g. from spreadsheet): split into rows/columns.
       var rawLines = text.split("\n").map(function(l) { return l.charAt(l.length - 1) === "\r" ? l.slice(0, -1) : l; });
       var lines = rawLines.length === 1 ? rawLines : rawLines.filter(function(l) { return l.trim() !== ""; });
       if (!lines.length) return;
