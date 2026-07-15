@@ -182,9 +182,7 @@ class TableWidget {
     this.insertLineEl = null;
     this.resizeObs = null;
     this.selected = null;
-    this.deleteBtnEl = null;
     this.deleteTableEl = null;
-    this.lineSelOutside = null;
     this.lineSelKey = null;
     this.cellSel = null;
     this.cellSelOutside = null;
@@ -657,7 +655,6 @@ class TableWidget {
         d.style.left = "-12px";
       }
     });
-    this.positionDeleteBtn();
   }
   /** Drag a divider to resize the column left of / row above it. */
   bindResize(div, axis, index) {
@@ -1692,6 +1689,33 @@ class TableWidget {
 
   // --- reorder + selection ---
   bindReorder(handle, axis, index) {
+    // Right-click on a handle shows a context menu to delete the line.
+    // More reliable than the floating delete button, which can end up
+    // off-screen when the proximity margin is small.
+    handle.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.clearLineSelection();
+      this.clearCellSelection();
+      this.selected = { axis, index };
+      const handles = axis === "row" ? this.rowHandles : this.colHandles;
+      handles[index] && handles[index].addClass("is-selected");
+      this.lineCells(axis, index).forEach((td) => td.addClass("cp-line-selected"));
+      const menu = new Menu();
+      const label = axis === "col" ? "Delete column" : "Delete row";
+      const self = this;
+      menu.addItem((i) =>
+        i
+          .setTitle(label)
+          .setIcon("trash-2")
+          .onClick(() => {
+            self.clearLineSelection();
+            self.deleteLine(axis, index);
+          })
+      );
+      menu.showAtMouseEvent(e);
+    });
+
     handle.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       e.stopPropagation();
@@ -1793,27 +1817,11 @@ class TableWidget {
     this.clearLineSelection();
     this.clearCellSelection();
     const table = this.tableEl;
-    const root = this.rootEl;
-    if (!table || !root) return;
+    if (!table) return;
     this.selected = { axis, index };
     const handles = axis === "row" ? this.rowHandles : this.colHandles;
     handles[index] && handles[index].addClass("is-selected");
     this.lineCells(axis, index).forEach((td) => td.addClass("cp-line-selected"));
-    const btn = (this.deleteBtnEl = root.createDiv({
-      cls: "cp-table-delete",
-      attr: { "aria-label": axis === "row" ? "Delete row" : "Delete column" }
-    }));
-    setIcon(btn, "trash-2");
-    btn.addEventListener("pointerdown", (ev) => {
-      ev.stopPropagation();
-      ev.preventDefault();
-      this.deleteLine(axis, index);
-    });
-    this.positionDeleteBtn();
-    this.lineSelOutside = (ev) => {
-      if (!root.contains(ev.target)) this.clearLineSelection();
-    };
-    this.doc.addEventListener("pointerdown", this.lineSelOutside, true);
     this.lineSelKey = (ev) => {
       if ((ev.key === "Delete" || ev.key === "Backspace") && !this.isEditing()) {
         ev.preventDefault();
@@ -1833,21 +1841,6 @@ class TableWidget {
     return Array.from(table.rows).map((r) => r.cells[index]).filter(Boolean);
   }
 
-  positionDeleteBtn() {
-    const btn = this.deleteBtnEl;
-    const sel = this.selected;
-    if (!btn || !sel) return;
-    const handle = (sel.axis === "row" ? this.rowHandles : this.colHandles)[sel.index];
-    if (!handle) return;
-    if (sel.axis === "row") {
-      btn.style.top = handle.style.top;
-      btn.style.left = "-34px";
-    } else {
-      btn.style.left = handle.style.left;
-      btn.style.top = "-34px";
-    }
-  }
-
   clearLineSelection() {
     if (this.selected) {
       const { axis, index } = this.selected;
@@ -1856,12 +1849,6 @@ class TableWidget {
       this.lineCells(axis, index).forEach((td) => td.removeClass("cp-line-selected"));
     }
     this.selected = null;
-    this.deleteBtnEl && this.deleteBtnEl.remove();
-    this.deleteBtnEl = null;
-    if (this.lineSelOutside) {
-      this.doc.removeEventListener("pointerdown", this.lineSelOutside, true);
-      this.lineSelOutside = null;
-    }
     if (this.lineSelKey) {
       this.doc.removeEventListener("keydown", this.lineSelKey, true);
       this.lineSelKey = null;
