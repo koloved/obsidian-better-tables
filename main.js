@@ -415,6 +415,10 @@ class TableWidget {
     this.resizeObs = new ResizeObserver(() => this.layout());
     this.resizeObs.observe(this.tableEl);
     window.requestAnimationFrame(() => this.layout());
+    // Return keyboard focus to the underlying editor (if it is a PM-based
+    // view) so Ctrl+Z / Ctrl+Shift+Z are captured by the editor's keymap
+    // after every render cycle.
+    this.focusEditor();
   }
 
   // --- proximity-based chrome visibility ---
@@ -702,6 +706,11 @@ class TableWidget {
       // A press here is ambiguous: a click selects the cell, a drag selects a
       // range of cells. beginCellPointer resolves it on move/up.
       this.beginCellPointer(td, r, c, e);
+      // After this interaction (which does not enter edit mode), return keyboard
+      // focus to the underlying editor so Ctrl+Z and other shortcuts work. The
+      // mousedown stopPropagation above prevented the editor from claiming focus
+      // naturally, but without this the PM keymap never sees Ctrl+Z.
+      if (!this.editingCell) this.focusEditor();
     });
     td.addEventListener("input", () => {
       this.refreshInternalLinkSuggest(td);
@@ -1944,6 +1953,23 @@ class TableWidget {
   }
 
   // --- persistence: write the block back into the note file ---
+  /** If the underlying content editor is a ProseMirror-based view, return
+   *  keyboard focus to its DOM element so that key handlers (including Ctrl+Z
+   *  / Ctrl+Shift+Z) work.  The table's own mousedown handler calls
+   *  stopPropagation, which prevents the editor from claiming focus naturally —
+   *  without this refocus the PM keymap never fires. */
+  focusEditor() {
+    if (!this.plugin || !this.plugin.app || !this.plugin.app.workspace) return;
+    const leaf = this.plugin.app.workspace.activeLeaf;
+    if (!leaf) return;
+    const view = leaf.view;
+    if (!view) return;
+    const pm = view.pmView;
+    if (pm && pm.dom && typeof pm.dom.focus === "function") {
+      pm.dom.focus({ preventScroll: true });
+    }
+  }
+
   serialize() {
     const md = mdFromCells(this.cells, this.colAlign);
     const sizeLine = `<!-- tk:cols=${this.colW.join(",")};rows=${this.rowH.join(",")}${this.pageWidth ? ";fit=1" : ""} -->`;
