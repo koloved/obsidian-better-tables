@@ -397,6 +397,7 @@ class TableWidget {
     if (this.pageWidth) {
       this.pageWidthBtn.addClass("is-active");
       this.rootEl.addClass("cp-table-fit-page");
+      this._updateLastDivider();
     }
     this.pageWidthBtn.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
@@ -526,10 +527,21 @@ class TableWidget {
     this.pageWidth = !this.pageWidth;
     if (this.pageWidthBtn) this.pageWidthBtn.toggleClass("is-active", this.pageWidth);
     if (this.rootEl) this.rootEl.toggleClass("cp-table-fit-page", this.pageWidth);
+    // The rightmost column divider is anchored in page-width mode — the table
+    // width is fixed at 100 %, so that edge can't move.
+    this._updateLastDivider();
     this.applySizes();
     window.requestAnimationFrame(() => this.layout());
     this.dirty = true;
     this.save();
+  }
+
+  /** Disable the last column divider when page-width mode is on. */
+  _updateLastDivider() {
+    if (!this.colDividers.length) return;
+    const last = this.colDividers[this.colDividers.length - 1];
+    last.style.cursor = this.pageWidth ? "default" : "";
+    last.style.pointerEvents = this.pageWidth ? "none" : "";
   }
 
   // --- sizing ---
@@ -625,6 +637,9 @@ class TableWidget {
       const startY = e.clientY;
       const startSize = axis === "col" ? this.colW[index] : this.rowH[index];
       const onMove = (ev) => {
+        // In page-width mode the rightmost divider is anchored — the table
+        // width is fixed at 100 % of the container, so it can't move.
+        if (axis === "col" && this.pageWidth && index === this.colW.length - 1) return;
         if (axis === "col") {
           const newSize = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
           const delta = newSize - this.colW[index];
