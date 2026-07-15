@@ -62,7 +62,7 @@
    clipped; overflow-x lets wide tables scroll horizontally. */
 .cp-table-scroll {
 	overflow-x: auto;
-	padding: 24px;
+	padding: 50px 24px 24px 24px;
 }
 
 /* Taller horizontal scrollbar — with many columns the thumb gets tiny.

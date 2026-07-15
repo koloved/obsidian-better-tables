@@ -611,8 +611,8 @@ class TableWidget {
     if (this.addRowEl) {
       // addRowEl lives on .tk-block (outside the scroll container) so it
       // stays centred in the viewport regardless of horizontal scroll.
-      // Top = scroll padding (24px) + table height + 6px gap.
-      this.addRowEl.style.top = `${24 + th + 6}px`;
+      // Top = scroll padding-top (50px) + table height + 6px gap.
+      this.addRowEl.style.top = `${50 + th + 6}px`;
       this.addRowEl.style.left = "50%";
       this.addRowEl.style.transform = "translateX(-50%)";
     }
@@ -2075,7 +2075,7 @@ class TableWidget {
    *  should fall back to vault.process).  Editor transactions go through CM6's
    *  undo stack or ProseMirror's history so Ctrl+Z / Ctrl+Shift+Z work on
    *  every table operation. */
-  tryEditorSave(plugin, sourcePath, sec, body) {
+  tryEditorSave(plugin, sourcePath, sec, body, oldBody) {
     if (!sec || !plugin.app.workspace) return false;
     const leaves = plugin.app.workspace.getLeavesOfType("markdown");
     // Check all leaf types, not just "markdown"
@@ -2112,12 +2112,15 @@ class TableWidget {
         doc.descendants((node, pos) => {
           if (found) return;
           if (node.type.name === "code_block" && node.attrs && node.attrs.language === "table") {
+            // When multiple table blocks exist on the page, match by content
+            // so we only replace the one being edited.
+            if (oldBody && node.textContent !== oldBody) return;
             const from = pos + 1;
             const to = pos + node.nodeSize - 1;
             const tr = pm.state.tr;
             tr.replaceWith(from, to, pm.state.schema.text(body));
+            found = true; // set before dispatch in case it throws
             pm.dispatch(tr);
-            found = true;
           }
         });
         if (found) return true;
@@ -2148,7 +2151,7 @@ class TableWidget {
 
     // Use the editor API when possible so changes flow through CM6's undo
     // stack and Ctrl+Z / Ctrl+Shift+Z work on every table operation.
-    if (sec && this.tryEditorSave(plugin, ctx.sourcePath, sec, body)) return;
+    if (sec && this.tryEditorSave(plugin, ctx.sourcePath, sec, body, oldBody)) return;
 
     // Fallback: persist through the vault API.  This path is taken when no
     // markdown editor is available for the file (reading view, file closed).
