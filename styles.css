@@ -217,6 +217,7 @@
 
 .cp-table-add-row {
 	height: 20px;
+	width: 120px;
 }
 
 .cp-table-add.is-visible {

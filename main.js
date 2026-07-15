@@ -326,7 +326,7 @@ class TableWidget {
       this.save();
     });
 
-    this.addRowEl = root.createDiv({ cls: "cp-table-add cp-table-add-row", attr: { "aria-label": "Add row" } });
+    this.addRowEl = this.el.createDiv({ cls: "cp-table-add cp-table-add-row", attr: { "aria-label": "Add row" } });
     setIcon(this.addRowEl, "plus");
     this.addRowEl.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
@@ -423,6 +423,14 @@ class TableWidget {
     this.resizeObs = new ResizeObserver(() => this.layout());
     this.resizeObs.observe(this.tableEl);
     window.requestAnimationFrame(() => this.layout());
+    // Restore horizontal scroll position that was captured in save() before
+    // the re-render.  Without this the table always snaps to column 0.
+    if (this.plugin._btPendingScroll !== undefined) {
+      const sl = this.plugin._btPendingScroll;
+      delete this.plugin._btPendingScroll;
+      const scrollEl = this.el.querySelector(".cp-table-scroll");
+      if (scrollEl) requestAnimationFrame(() => { scrollEl.scrollLeft = sl; });
+    }
     // Return keyboard focus to the underlying editor (if it is a PM-based
     // view) so Ctrl+Z / Ctrl+Shift+Z are captured by the editor's keymap
     // after every render cycle.
@@ -431,10 +439,12 @@ class TableWidget {
 
   // --- proximity-based chrome visibility ---
   bindChromeTracker() {
-    const root = this.rootEl;
-    if (!root) return;
-    root.addEventListener("pointermove", (e) => this.updateChrome(e));
-    root.addEventListener("pointerleave", () => {
+    // Track on the block element so the add-row button (which lives outside
+    // .cp-table-root) is included in the proximity zone.
+    const el = this.el;
+    if (!el) return;
+    el.addEventListener("pointermove", (e) => this.updateChrome(e));
+    el.addEventListener("pointerleave", () => {
       if (!this.isEditing()) this.hideChrome();
     });
   }
@@ -443,13 +453,12 @@ class TableWidget {
     const t = this.tableEl;
     if (!t || !t.isConnected) return;
     const rect = t.getBoundingClientRect();
-    const M = 48;
+    const M = 16;
     if (e.clientX < rect.left - M || e.clientX > rect.right + M || e.clientY < rect.top - M || e.clientY > rect.bottom + M) {
       this.hideChrome();
       return;
     }
     const x = Math.min(Math.max(e.clientX, rect.left + 1), rect.right - 1);
-    const y = Math.min(Math.max(e.clientY, rect.top + 1), rect.bottom - 1);
     let c = 0;
     let r = 0;
     const first = t.rows[0];
@@ -460,11 +469,18 @@ class TableWidget {
         break;
       }
     }
-    for (let i = 0; i < t.rows.length; i++) {
-      const rr = t.rows[i].getBoundingClientRect();
-      if (y >= rr.top && y <= rr.bottom) {
-        r = i;
-        break;
+    // Pointer below the table → treat as hovering the last row so the
+    // add-row button (which sits in the gap) stays visible.
+    if (e.clientY >= rect.bottom) {
+      r = this.cells.length - 1;
+    } else {
+      const y = Math.min(Math.max(e.clientY, rect.top + 1), rect.bottom - 1);
+      for (let i = 0; i < t.rows.length; i++) {
+        const rr = t.rows[i].getBoundingClientRect();
+        if (y >= rr.top && y <= rr.bottom) {
+          r = i;
+          break;
+        }
       }
     }
     const cols = this.cells[0].length;
@@ -595,9 +611,12 @@ class TableWidget {
       this.addColEl.style.height = `${th}px`;
     }
     if (this.addRowEl) {
-      this.addRowEl.style.top = `${th + 6}px`;
-      this.addRowEl.style.left = "0px";
-      this.addRowEl.style.width = `${tw}px`;
+      // addRowEl lives on .tk-block (outside the scroll container) so it
+      // stays centred in the viewport regardless of horizontal scroll.
+      // Top = scroll padding (24px) + table height + 6px gap.
+      this.addRowEl.style.top = `${24 + th + 6}px`;
+      this.addRowEl.style.left = "50%";
+      this.addRowEl.style.transform = "translateX(-50%)";
     }
     const first = t.rows[0];
     this.colHandles.forEach((h, i) => {
@@ -640,7 +659,6 @@ class TableWidget {
     });
     this.positionDeleteBtn();
   }
-
   /** Drag a divider to resize the column left of / row above it. */
   bindResize(div, axis, index) {
     div.addEventListener("pointerdown", (e) => {
@@ -652,50 +670,70 @@ class TableWidget {
       const startX = e.clientX;
       const startY = e.clientY;
       const startSize = axis === "col" ? this.colW[index] : this.rowH[index];
+
       const onMove = (ev) => {
         // In page-width mode the rightmost divider is anchored — the table
         // width is fixed at 100 % of the container, so it can't move.
         if (axis === "col" && this.pageWidth && index === this.colW.length - 1) return;
         if (axis === "col") {
-          const newSize = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
-          const delta = newSize - this.colW[index];
-          // Page-width mode: adjust the adjacent column so the total stays
-          // constant.  Clamp the delta so the neighbour never drops below
-          // MIN_W — otherwise the total would drift and all columns rescale.
+          this.colW[index] = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
+        } else {
+          this.rowH[index] = Math.max(MIN_H, Math.round(startSize + (ev.clientY - startY)));
+        }
+        // Don't touch the DOM while dragging — even applySizes() forces a
+        // full table re-layout on every frame.  Instead show a lightweight
+        // indicator line; the real update happens once on pointerup.
+        if (this.insertLineEl) {
+          const rr = this.rootEl.getBoundingClientRect();
+          if (axis === "col") {
+            this.insertLineEl.style.left = `${ev.clientX - rr.left}px`;
+            this.insertLineEl.style.top = "0px";
+            this.insertLineEl.style.width = "2px";
+            this.insertLineEl.style.height = `${this.tableEl.offsetHeight}px`;
+          } else {
+            this.insertLineEl.style.top = `${ev.clientY - rr.top}px`;
+            this.insertLineEl.style.left = "0px";
+            this.insertLineEl.style.height = "2px";
+            this.insertLineEl.style.width = `${this.tableEl.offsetWidth}px`;
+          }
+          this.insertLineEl.show();
+        }
+      };
+
+      const onUp = () => {
+        div.removeEventListener("pointermove", onMove);
+        this.insertLineEl && this.insertLineEl.hide();
+        // Now commit: update the model to reflect the final position, apply
+        // sizes + layout once, and persist.
+        if (axis === "col") {
+          // Re-apply with adjacent-column logic for page-width mode
+          const finalSize = this.colW[index];
+          this.colW[index] = startSize; // reset to drag-start value
+          const delta = finalSize - startSize;
           if (this.pageWidth) {
             const adjIdx = index + 1 < this.colW.length ? index + 1 : index - 1;
             if (adjIdx >= 0) {
               const maxShrink = this.colW[adjIdx] - MIN_W;
-              if (delta > maxShrink) {
-                this.colW[index] += maxShrink;
-                this.colW[adjIdx] = MIN_W;
-              } else {
-                this.colW[index] = newSize;
-                this.colW[adjIdx] -= delta;
-              }
+              const clamped = delta > maxShrink ? maxShrink : delta;
+              this.colW[index] = startSize + clamped;
+              this.colW[adjIdx] -= clamped;
             } else {
-              this.colW[index] = newSize;
+              this.colW[index] = finalSize;
             }
           } else {
-            this.colW[index] = newSize;
+            this.colW[index] = finalSize;
           }
-        } else {
-          this.rowH[index] = Math.max(MIN_H, Math.round(startSize + (ev.clientY - startY)));
         }
         this.applySizes();
         this.layout();
-      };
-      const onUp = () => {
-        div.removeEventListener("pointermove", onMove);
         div.removeClass("is-resizing");
         this.save();
       };
+
       div.addEventListener("pointermove", onMove);
       div.addEventListener("pointerup", onUp, { once: true });
     });
   }
-
-  // --- cell editing ---
   async renderCellMarkdown(td, text) {
     td._btRawText = text;
     td._btRenderVersion = (td._btRenderVersion || 0) + 1;
@@ -2102,6 +2140,12 @@ class TableWidget {
   }
 
   save() {
+    // Capture horizontal scroll position so we can restore it after the
+    // re-render that vault.process / editor transaction will trigger.
+    // Otherwise the table always jumps back to column 0 after every edit.
+    const scrollEl = this.el.querySelector(".cp-table-scroll");
+    if (scrollEl) this.plugin._btPendingScroll = scrollEl.scrollLeft;
+
     this.dirty = false;
     const oldBody = this.source;
     const body = this.serialize();
