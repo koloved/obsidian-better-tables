@@ -65,6 +65,28 @@
 	padding: 50px;
 }
 
+/* Taller horizontal scrollbar — with many columns the thumb gets tiny.
+   A 14px bar with a minimum-thumb-width makes it actually grabbable. */
+.cp-table-scroll::-webkit-scrollbar {
+	height: 14px;
+}
+
+.cp-table-scroll::-webkit-scrollbar-thumb {
+	min-width: 48px;
+	border-radius: 7px;
+	background-color: var(--scrollbar-thumb-bg, var(--text-muted));
+	border: 2px solid transparent;
+	background-clip: content-box;
+}
+
+.cp-table-scroll::-webkit-scrollbar-thumb:hover {
+	background-color: var(--scrollbar-active-thumb-bg, var(--text-normal));
+}
+
+.cp-table-scroll::-webkit-scrollbar-track {
+	background: transparent;
+}
+
 /* Hide the default code-block copy button on our blocks. */
 .tk-block .copy-code-button {
 	display: none;
