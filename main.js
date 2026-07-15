@@ -1797,12 +1797,75 @@ class TableWidget {
   }
 
   /** Remove the entire ```table block (fences included) from the note. */
+  tryEditorDelete(plugin, sourcePath, sec) {
+    if (!sec || !plugin.app.workspace) return false;
+    const allLeaves = [];
+    plugin.app.workspace.iterateAllLeaves((l) => allLeaves.push(l));
+    for (let li = 0; li < allLeaves.length; li++) {
+      const leaf = allLeaves[li];
+      const view = leaf.view;
+      if (!view) continue;
+      const file = view.file;
+      if (!file || file.path !== sourcePath) continue;
+      // --- CM6 / standard Obsidian editor path ---
+      const editor = view.editor;
+      if (editor && typeof editor.getLine === "function") {
+        const open = editor.getLine(sec.lineStart);
+        const close = editor.getLine(sec.lineEnd);
+        const fenceOpen = /^\s*(`{3,}|~{3,})\s*table\b/.test(open || "");
+        const fenceClose = /^\s*(`{3,}|~{3,})\s*$/.test(close || "");
+        if (!fenceOpen || !fenceClose) return false;
+        // Remove from the start of the opening fence through the end of the
+        // closing fence, plus one trailing blank line if present.
+        let endLine = sec.lineEnd;
+        const nextLine = editor.getLine(endLine + 1);
+        if (nextLine !== undefined && nextLine.trim() === "") endLine++;
+        editor.replaceRange(
+          "",
+          { line: sec.lineStart, ch: 0 },
+          { line: endLine + 1, ch: 0 }
+        );
+        return true;
+      }
+      // --- ProseMirror path ---
+      const pm = view.pmView || (view.editor && (view.editor.pm || (view.editor.getDoc && view.editor.getDoc().pm)));
+      if (pm && pm.state && pm.dispatch) {
+        const doc = pm.state.doc;
+        let found = false;
+        doc.descendants((node, pos) => {
+          if (found) return;
+          if (node.type.name === "code_block" && node.attrs && node.attrs.language === "table") {
+            // Delete from start of heading to end of code_block + one more line
+            const from = pos;
+            const to = pos + node.nodeSize;
+            const tr = pm.state.tr;
+            tr.delete(from, to);
+            pm.dispatch(tr);
+            found = true;
+          }
+        });
+        if (found) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Remove the entire ```table block (fences included) from the note. */
   deleteTable() {
     const el = this.el;
     const ctx = this.ctx;
     const plugin = this.plugin;
     const oldBody = this.source;
     const info = ctx.getSectionInfo(el);
+    const sec = info || ctx.getSectionInfo(el);
+
+    // Use the editor API when possible so the deletion is undoable.
+    if (sec && this.tryEditorDelete(plugin, ctx.sourcePath, sec)) {
+      new Notice("Better Tables: table deleted.");
+      return;
+    }
+
+    // Fallback: vault.process() deletion.
     plugin.queueWrite(async () => {
       const file = plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
       if (!file) return;
@@ -1887,6 +1950,62 @@ class TableWidget {
     return `${md}\n${sizeLine}`;
   }
 
+  /** Try to persist by replacing the fenced block via the editor API.
+   *  Returns true on success, false when no matching editor is open (caller
+   *  should fall back to vault.process).  Editor transactions go through CM6's
+   *  undo stack or ProseMirror's history so Ctrl+Z / Ctrl+Shift+Z work on
+   *  every table operation. */
+  tryEditorSave(plugin, sourcePath, sec, body) {
+    if (!sec || !plugin.app.workspace) return false;
+    const leaves = plugin.app.workspace.getLeavesOfType("markdown");
+    // Check all leaf types, not just "markdown"
+    const allLeaves = [];
+    plugin.app.workspace.iterateAllLeaves((l) => allLeaves.push(l));
+    for (let li = 0; li < allLeaves.length; li++) {
+      const leaf = allLeaves[li];
+      const view = leaf.view;
+      if (!view) continue;
+      const file = view.file;
+      if (!file || file.path !== sourcePath) continue;
+      // --- CM6 / standard Obsidian editor path ---
+      const editor = view.editor;
+      if (editor && typeof editor.getLine === "function") {
+        const open = editor.getLine(sec.lineStart);
+        const close = editor.getLine(sec.lineEnd);
+        const fenceOpen = /^\s*(`{3,}|~{3,})\s*table\b/.test(open || "");
+        const fenceClose = /^\s*(`{3,}|~{3,})\s*$/.test(close || "");
+        if (fenceOpen && fenceClose) {
+          const newContent = open + "\n" + body + "\n" + close;
+          editor.replaceRange(
+            newContent,
+            { line: sec.lineStart, ch: 0 },
+            { line: sec.lineEnd, ch: close.length }
+          );
+          return true;
+        }
+      }
+      // --- ProseMirror path ---
+      const pm = view.pmView || (view.editor && (view.editor.pm || (view.editor.getDoc && view.editor.getDoc().pm)));
+      if (pm && pm.state && pm.dispatch) {
+        const doc = pm.state.doc;
+        let found = false;
+        doc.descendants((node, pos) => {
+          if (found) return;
+          if (node.type.name === "code_block" && node.attrs && node.attrs.language === "table") {
+            const from = pos + 1;
+            const to = pos + node.nodeSize - 1;
+            const tr = pm.state.tr;
+            tr.replaceWith(from, to, pm.state.schema.text(body));
+            pm.dispatch(tr);
+            found = true;
+          }
+        });
+        if (found) return true;
+      }
+    }
+    return false;
+  }
+
   save() {
     this.dirty = false;
     const oldBody = this.source;
@@ -1899,13 +2018,17 @@ class TableWidget {
     // It can be null right after a block is created (Obsidian hasn't indexed it
     // yet) — in that case we fall back to locating the block by its content.
     const info = ctx.getSectionInfo(el);
-    // Persist through a single serialized queue so writes can't interleave and
-    // clobber each other's line ranges. Obsidian re-renders the block when the
-    // file changes, so we don't render optimistically (which caused a flash).
+    const sec = info || ctx.getSectionInfo(el);
+
+    // Use the editor API when possible so changes flow through CM6's undo
+    // stack and Ctrl+Z / Ctrl+Shift+Z work on every table operation.
+    if (sec && this.tryEditorSave(plugin, ctx.sourcePath, sec, body)) return;
+
+    // Fallback: persist through the vault API.  This path is taken when no
+    // markdown editor is available for the file (reading view, file closed).
     plugin.queueWrite(async () => {
       const file = plugin.app.vault.getAbstractFileByPath(ctx.sourcePath);
       if (!file) return;
-      const sec = info || ctx.getSectionInfo(el);
       try {
         await plugin.app.vault.process(file, (data) => {
           // 1) Precise path: replace a validated fenced line range.
