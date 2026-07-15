@@ -314,6 +314,13 @@ class TableWidget {
       e.preventDefault();
       this.flushEdit();
       this.cells.forEach((row) => row.push(""));
+      // Page-width mode: take half of the new column's width from the last
+      // existing column so only the adjacent column adjusts, not all of them.
+      if (this.pageWidth && this.colW.length) {
+        const last = this.colW.length - 1;
+        const half = Math.round(TABLE_CELL_W / 2);
+        this.colW[last] = Math.max(MIN_W, this.colW[last] - half);
+      }
       this.colW.push(TABLE_CELL_W);
       this.colAlign.push(null);
       this.save();
@@ -492,6 +499,15 @@ class TableWidget {
         this.cells.forEach((row) => row.splice(boundary + 1, 0, ""));
         this.colW.splice(boundary + 1, 0, TABLE_CELL_W);
         this.colAlign.splice(boundary + 1, 0, null);
+        // Page-width mode: take half of the new column's width from each
+        // adjacent column so only those two adjust, not the whole table.
+        if (this.pageWidth) {
+          const half = Math.round(TABLE_CELL_W / 2);
+          this.colW[boundary] = Math.max(MIN_W, this.colW[boundary] - half);
+          const rightIdx = boundary + 2;
+          if (rightIdx < this.colW.length)
+            this.colW[rightIdx] = Math.max(MIN_W, this.colW[rightIdx] - half);
+        }
       } else {
         this.cells.splice(boundary + 1, 0, this.cells[0].map(() => ""));
         this.rowH.splice(boundary + 1, 0, TABLE_CELL_H);
@@ -643,12 +659,25 @@ class TableWidget {
         if (axis === "col") {
           const newSize = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
           const delta = newSize - this.colW[index];
-          this.colW[index] = newSize;
           // Page-width mode: adjust the adjacent column so the total stays
-          // constant and the table doesn't jitter while you drag.
+          // constant.  Clamp the delta so the neighbour never drops below
+          // MIN_W — otherwise the total would drift and all columns rescale.
           if (this.pageWidth) {
             const adjIdx = index + 1 < this.colW.length ? index + 1 : index - 1;
-            if (adjIdx >= 0) this.colW[adjIdx] = Math.max(MIN_W, this.colW[adjIdx] - delta);
+            if (adjIdx >= 0) {
+              const maxShrink = this.colW[adjIdx] - MIN_W;
+              if (delta > maxShrink) {
+                this.colW[index] += maxShrink;
+                this.colW[adjIdx] = MIN_W;
+              } else {
+                this.colW[index] = newSize;
+                this.colW[adjIdx] -= delta;
+              }
+            } else {
+              this.colW[index] = newSize;
+            }
+          } else {
+            this.colW[index] = newSize;
           }
         } else {
           this.rowH[index] = Math.max(MIN_H, Math.round(startSize + (ev.clientY - startY)));
@@ -1812,9 +1841,34 @@ class TableWidget {
       this.cells.splice(index, 1);
       this.rowH.splice(index, 1);
     } else {
-      for (const row of this.cells) row.splice(index, 1);
-      this.colW.splice(index, 1);
-      this.colAlign.splice(index, 1);
+      // In page-width mode, give the deleted column's width to its immediate
+      // neighbours so non-adjacent columns keep their visual widths.
+      if (this.pageWidth) {
+        const deletedVal = this.colW[index];
+        for (const row of this.cells) row.splice(index, 1);
+        this.colW.splice(index, 1);
+        this.colAlign.splice(index, 1);
+        // Adjacent indices after splice: left = index-1, right = index
+        const left = index - 1;
+        const right = index;
+        const adj = [];
+        if (left >= 0) adj.push(left);
+        if (right < this.colW.length) adj.push(right);
+        if (adj.length > 0) {
+          const adjTotal = adj.reduce((s, i) => s + this.colW[i], 0);
+          let remaining = deletedVal;
+          for (let a = 0; a < adj.length - 1; a++) {
+            const share = Math.round(deletedVal * this.colW[adj[a]] / adjTotal);
+            this.colW[adj[a]] += share;
+            remaining -= share;
+          }
+          this.colW[adj[adj.length - 1]] += remaining; // absorbs rounding
+        }
+      } else {
+        for (const row of this.cells) row.splice(index, 1);
+        this.colW.splice(index, 1);
+        this.colAlign.splice(index, 1);
+      }
     }
     this.clearLineSelection();
     this.save();
