@@ -1438,7 +1438,7 @@ class TableWidget {
         var sel = window.getSelection();
         if (!sel || sel.rangeCount === 0) return;
         var selectedText = sel.toString();
-        if (selectedText) {
+        if (selectedText && e.clipboardData) {
           e.clipboardData.setData("text/plain", selectedText);
         }
       });
