@@ -962,12 +962,15 @@ class TableWidget {
         ev.stopPropagation();
         this.copyCellSelection();
       } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === "v" || ev.key === "V")) {
-        // Ctrl+V on selected cell(s): paste into the anchor cell
-        ev.preventDefault();
+        // Ctrl+V on selected cell(s): enter edit mode and let the native
+        // paste handler fire on the contenteditable cell. The paste listener
+        // handles text (insertText) and images (save to vault + embed).
         ev.stopPropagation();
-        var self5 = this;
-        var r0 = this.cellSel.r0, c0 = this.cellSel.c0;
-        self5.pasteIntoCell(r0, c0);
+        this._pendingFinishEdit = true;
+        const { r0, c0 } = this.cellSel;
+        const td = this.tableEl.rows[r0] && this.tableEl.rows[r0].cells[c0];
+        if (td) this.editCell(td, r0, c0, true);
+        // Don't preventDefault — let the browser fire a paste event on the td.
       } else if (ev.key === "Enter" || ev.key === "F2") {
         // Edit the selection's anchor cell, caret at the end.
         ev.preventDefault();
@@ -1146,6 +1149,107 @@ class TableWidget {
     }
   }
 
+
+  /**
+   * Read an image from the Electron native clipboard (fallback when
+   * navigator.clipboard.read() returns items with empty types).
+   * Returns a Blob or null.
+   */
+  _readElectronClipboardImage() {
+    try {
+      // In Obsidian's Electron context, nativeImage is available
+      var nativeImage = require("electron").clipboard.readImage();
+      if (nativeImage && !nativeImage.isEmpty()) {
+        var png = nativeImage.toPNG();
+        return new Blob([png], {type: "image/png"});
+      }
+    } catch (e) {
+      console.log("BT: electron clipboard not available", e);
+    }
+    return null;
+  }
+
+  /** Save image files from clipboard paste to vault and insert [[embed]] links. */  /** Save image files from clipboard paste to vault and insert [[embed]] links. */
+  
+  /**
+   * Save a pasted image blob to the vault and return the [[embed]] link.
+   * Used by both the editing-cell paste listener and pasteIntoCell.
+   */
+  async _savePastedImage(blob, ext) {
+    try {
+      var ab = await blob.arrayBuffer();
+      var now = new Date();
+      var ts = now.getFullYear() +
+        String(now.getMonth() + 1).padStart(2, "0") +
+        String(now.getDate()).padStart(2, "0") +
+        String(now.getHours()).padStart(2, "0") +
+        String(now.getMinutes()).padStart(2, "0") +
+        String(now.getSeconds()).padStart(2, "0");
+      var fname = "Pasted image " + ts + "." + ext;
+      var folder = this.plugin.app.vault.getConfig("attachmentFolderPath") || "";
+      // Normalize: strip leading "./" and surrounding slashes
+      folder = folder.replace(/^\.?\/+|\/+$/g, "");
+      var path = folder ? folder + "/" + fname : fname;
+      if (this.plugin.app.vault.getAbstractFileByPath(path)) {
+        var base = folder ? folder + "/" : "";
+        var parts = fname.split(".");
+        var stem = parts.slice(0, -1).join(".");
+        var suffix = parts[parts.length - 1];
+        for (var n = 1; ; n++) {
+          path = base + stem + " " + n + "." + suffix;
+          if (!this.plugin.app.vault.getAbstractFileByPath(path)) break;
+        }
+      }
+      // Ensure the attachments folder exists
+      if (folder) {
+        var folderExists = this.plugin.app.vault.getAbstractFileByPath(folder);
+        if (!folderExists) {
+          await this.plugin.app.vault.createFolder(folder);
+          console.log("BT created folder:", folder);
+        }
+      }
+      await this.plugin.app.vault.createBinary(path, ab);
+      console.log("BT saved pasted image:", path);
+      return "![[" + fname + "]]";
+    } catch (err) {
+      console.error("BT _savePastedImage error:", err);
+      new Notice("Better Tables: failed to paste image.");
+      return null;
+    }
+  }
+
+async _pasteImageFiles(td, files) {
+    console.log("BT _pasteImageFiles called, files=", files.length);
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      if (!file.type || !file.type.startsWith("image/")) continue;
+      try {
+        var ext = file.type.split("/")[1] || "png";
+        var embed = await this._savePastedImage(file, ext);
+        if (!embed) return;
+        // Restore focus and caret (async ops may have lost it)
+        if (this.editingCell !== td) this.editCell(td, this.editingPos ? this.editingPos.r : 0, this.editingPos ? this.editingPos.c : 0, true);
+        td.focus();
+        var rng = document.createRange();
+        rng.selectNodeContents(td);
+        rng.collapse(false);
+        var sl = window.getSelection();
+        sl && sl.removeAllRanges();
+        sl && sl.addRange(rng);
+        this.doc.execCommand("insertText", false, embed);} catch (err) {
+        console.error("BT paste image error:", err);
+        new Notice("Better Tables: failed to paste image.");
+      }
+    }
+    window.requestAnimationFrame(function() {
+      this.layout();
+      if (this._pendingFinishEdit) {
+        this._pendingFinishEdit = false;
+        this.finishEditing();
+      }
+    }.bind(this));
+  }
+
   /** Reliable clipboard write. */
   _copyToClipboard(text) {
     console.log("BT _copyToClipboard called, text length=", text ? text.length : 0, "text=", (text||"").substring(0,30));
@@ -1182,7 +1286,64 @@ class TableWidget {
     try {
       var text = await navigator.clipboard.readText();
       console.log("BT pasteIntoCell clipboard text length=", text ? text.length : 0);
-      if (!text) return;
+      if (!text) {
+        // No text - check for image files in clipboard
+        console.log("BT pasteIntoCell: readText empty, trying clipboard.read()");
+        try {
+          var items = await navigator.clipboard.read();
+          console.log("BT pasteIntoCell: clipboard items count=", items.length);
+          for (var ii = 0; ii < items.length; ii++) {
+            console.log("BT pasteIntoCell: item[" + ii + "] types=", items[ii].types.join(", "), "typesLen=", items[ii].types.length);
+            if (items[ii].types.length === 0) {
+              console.log("BT pasteIntoCell: item[" + ii + "] types array empty, trying fallback");
+              // Electron native clipboard fallback: read image directly
+              try {
+                var imageNative = this._readElectronClipboardImage();
+                if (imageNative) {
+                  var embed = await this._savePastedImage(imageNative, "png");
+                  if (embed) {
+                    console.log("BT pasteIntoCell: electron clipboard image saved", embed.substring(0,30));
+                    this.cells[r][c] = embed;
+                    this.dirty = true;
+                    this.save();
+                  }
+                  return;
+                }
+              } catch (nativeErr) {
+                console.error("BT pasteIntoCell: electron clipboard fallback error", nativeErr);
+              }
+            }
+            for (var j = 0; j < items[ii].types.length; j++) {
+              var type = items[ii].types[j];
+              console.log("BT pasteIntoCell: checking type=", type);
+              if (type.startsWith("image/")) {
+                console.log("BT pasteIntoCell: FOUND image type=", type);
+                try {
+                  var blob = await items[ii].getType(type);
+                  var ext = type.split("/")[1] || "png";
+                  console.log("BT pasteIntoCell: got blob size=", blob.size, "ext=", ext);
+                  var embed = await this._savePastedImage(blob, ext);
+                  console.log("BT pasteIntoCell: _savePastedImage returned=", embed ? embed.substring(0,30) : "null");
+                  if (embed) {
+                    console.log("BT pasteIntoCell: setting cells[" + r + "][" + c + "]=", embed);
+                    this.cells[r][c] = embed;
+                    this.dirty = true;
+                    this.save();
+                    console.log("BT pasteIntoCell: save() called");
+                  }
+                } catch (imgErr) {
+                  console.error("BT pasteIntoCell: image handling error", imgErr);
+                }
+                return;
+              }
+            }
+          }
+          console.log("BT pasteIntoCell: no image types found in clipboard items");
+        } catch (e) {
+          console.log("BT pasteIntoCell: clipboard.read() failed", e);
+        }
+        return;
+      }
       // Plain multi-line text without tabs → paste into the single cell
       // with newlines encoded as <br>, rather than creating new rows.
       if (text.indexOf("\t") === -1) {
@@ -1470,12 +1631,9 @@ class TableWidget {
           this.insertLineBreak(td);
           return;
         }
-        // Ctrl+V paste: handle ourselves so Obsidian doesn't intercept it.
+        // Ctrl+V paste: handled by the paste event listener below.
         if (mod && (e.key === "v" || e.key === "V")) {
-          console.log("BT keydown Ctrl+V detected");
-          e.preventDefault();
           e.stopPropagation();
-          this._pasteAtCursor(td);
           return;
         }
         // Let other standard modifier shortcuts (Ctrl+X cut, Ctrl+C copy,
@@ -1529,6 +1687,44 @@ class TableWidget {
         var selectedText = sel.toString();
         if (selectedText && e.clipboardData) {
           e.clipboardData.setData("text/plain", selectedText);
+        }
+      });
+            // Paste handler - text via execCommand, images via vault save + embed
+      td.addEventListener("paste", (e) => {
+        if (this.editingCell !== td) return;
+        // Check for image files first (when copying from file manager the
+        // clipboard may also contain the file path as text, which we must
+        // ignore so the image gets saved and embedded instead).
+        var files = e.clipboardData && e.clipboardData.files;
+        if (files && files.length > 0) {
+          var hasImage = false;
+          for (var fi = 0; fi < files.length; fi++) {
+            if (files[fi].type && files[fi].type.startsWith("image/")) {
+              hasImage = true;
+              break;
+            }
+          }
+          if (hasImage) {
+            e.preventDefault();
+            e.stopPropagation();
+            this._pasteImageFiles(td, files);
+            return;
+          }
+        }
+        // Plain text paste
+        var text = e.clipboardData && e.clipboardData.getData("text/plain");
+        if (text) {
+          e.preventDefault();
+          e.stopPropagation();
+          console.log("BT paste in cell, length=", text.length);
+          this.doc.execCommand("insertText", false, text);
+          window.requestAnimationFrame(function() {
+            this.layout();
+            if (this._pendingFinishEdit) {
+              this._pendingFinishEdit = false;
+              this.finishEditing();
+            }
+          }.bind(this));
         }
       });
     }
