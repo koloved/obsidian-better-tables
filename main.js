@@ -667,13 +667,35 @@ class TableWidget {
       const startX = e.clientX;
       const startY = e.clientY;
       const startSize = axis === "col" ? this.colW[index] : this.rowH[index];
+      // Pre-calculate weight/pixel ratio for page-width mode so the
+      // conversion is stable across pointermove events.
+      var startTotalW, pageCw;
+      if (axis === "col" && this.pageWidth) {
+        startTotalW = this.colW.reduce(function(s, w) { return s + w; }, 0);
+        pageCw = this.tableEl.offsetWidth || 1;
+      }
 
       const onMove = (ev) => {
         // In page-width mode the rightmost divider is anchored — the table
         // width is fixed at 100 % of the container, so it can't move.
         if (axis === "col" && this.pageWidth && index === this.colW.length - 1) return;
         if (axis === "col") {
-          this.colW[index] = Math.max(MIN_W, Math.round(startSize + (ev.clientX - startX)));
+          var rawSize;
+          if (this.pageWidth) {
+            // colW values are proportional weights, not pixels.
+            // Convert the pixel delta to a proportional weight delta.
+            var weightDelta = (ev.clientX - startX) * (startTotalW / pageCw);
+            rawSize = Math.round(startSize + weightDelta);
+            // Clamp so the adjacent column never goes below MIN_W.
+            var adjIdx = index + 1 < this.colW.length ? index + 1 : index - 1;
+            if (adjIdx >= 0 && weightDelta > 0) {
+              var maxShrink = this.colW[adjIdx] - MIN_W;
+              if (weightDelta > maxShrink) rawSize = startSize + maxShrink;
+            }
+          } else {
+            rawSize = Math.round(startSize + (ev.clientX - startX));
+          }
+          this.colW[index] = Math.max(MIN_W, rawSize);
         } else {
           this.rowH[index] = Math.max(MIN_H, Math.round(startSize + (ev.clientY - startY)));
         }
