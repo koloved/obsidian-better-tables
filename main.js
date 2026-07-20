@@ -1689,13 +1689,30 @@ async _pasteImageFiles(td, files) {
           e.clipboardData.setData("text/plain", selectedText);
         }
       });
-            // Paste handler - text via execCommand, images via vault save + embed
+      // Paste handler - text via execCommand, images via vault save + embed
       td.addEventListener("paste", (e) => {
         if (this.editingCell !== td) return;
-        // Check for image files first (when copying from file manager the
-        // clipboard may also contain the file path as text, which we must
-        // ignore so the image gets saved and embedded instead).
+        var text = e.clipboardData && e.clipboardData.getData("text/plain");
         var files = e.clipboardData && e.clipboardData.files;
+        // Priority: embed link text > image file > plain text
+        // If clipboard has text that looks like an Obsidian embed (![[), insert
+        // it directly rather than re-saving the image (which would duplicate it).
+        if (text && text.indexOf("![[") >= 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          console.log("BT paste embed link, length=", text.length);
+          this.doc.execCommand("insertText", false, text);
+          window.requestAnimationFrame(function() {
+            this.layout();
+            if (this._pendingFinishEdit) {
+              this._pendingFinishEdit = false;
+              this.finishEditing();
+            }
+          }.bind(this));
+          return;
+        }
+        // Image files from file manager clipboard (text is the file path) —
+        // save to vault and embed as a new attachment.
         if (files && files.length > 0) {
           var hasImage = false;
           for (var fi = 0; fi < files.length; fi++) {
@@ -1711,8 +1728,7 @@ async _pasteImageFiles(td, files) {
             return;
           }
         }
-        // Plain text paste
-        var text = e.clipboardData && e.clipboardData.getData("text/plain");
+        // Plain text paste (no files, no embed link)
         if (text) {
           e.preventDefault();
           e.stopPropagation();
